@@ -38,7 +38,8 @@ class SessionTask(_Task):
             from core.session import load_session, write_context
 
             ctx = load_session()
-            write_context(self._folder, ctx)
+            if self._folder:
+                write_context(self._folder, ctx)
             self.context_ready.emit((self._folder, ctx))
 
         self._guard(work)
@@ -58,7 +59,7 @@ class ClipTask(_Task):
     def run(self) -> None:
         from pathlib import Path
 
-        from core.capture import copy_new_clip, request_clip
+        from core.capture import copy_new_clip, find_new_clip, request_clip
 
         shown = False
         try:
@@ -67,10 +68,12 @@ class ClipTask(_Task):
             self.ready.emit(result)
             shown = True
             path = ""
-            if result.watch_clip:
+            if result.watch_clip and self._folder:
                 path = copy_new_clip(
                     Path(self._folder), result.clip_before, result.clip_started,
                 ) or ""
+            elif result.watch_clip:
+                path = find_new_clip(result.clip_before, result.clip_started) or ""
             self.clip_ready.emit((self._folder, path))
         except Exception as exc:  # disk, SendInput — reported, never fatal
             log.warning("bug_report: clip failed: %s", exc)

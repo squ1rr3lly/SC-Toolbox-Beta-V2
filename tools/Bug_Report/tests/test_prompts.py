@@ -13,11 +13,14 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from shared.config_models import WindowGeometry
 
 from core.bugmirror import NEW_ISSUE_URL, IssueDetail, IssueHit, SearchResult
+from core.issues import read_issue_state, write_issue_state
+from core.progress import draft_from_dict, load_progress
+from core.report import ReportDraft
 from ui.window import BugReportWindow
 
 
@@ -235,8 +238,6 @@ def test_hiding_saves_the_form_and_reopening_returns_to_it(qapp, tmp_path, monke
     assert again._clip_started == 1234.5
     assert again.isVisible()
 
-    made: list[str] = []
-
     class _Session(QObject):
         context_ready = Signal(object)
         failed = Signal(str)
@@ -244,21 +245,21 @@ def test_hiding_saves_the_form_and_reopening_returns_to_it(qapp, tmp_path, monke
 
         def __init__(self, folder, parent=None) -> None:
             super().__init__(parent)
-            made.append(str(folder))
 
         def start(self) -> None:
             self.finished.emit()
 
-    fresh = tmp_path / "fresh"
-    monkeypatch.setattr("ui.window.make_issue_dir", lambda: fresh)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    monkeypatch.setattr("core.issues.REPORTS_ROOT", reports)
     monkeypatch.setattr("ui.window.SessionTask", _Session)
     again._finish()
-    assert not (tmp_path / "in_progress.json").exists()
-    again.handle_ipc_command({"type": "hide"})
-    again.show_or_resume()
-    assert made == [str(fresh)]
     assert again._pages.currentIndex() == 0
+    assert again._folder == ""
     assert again._description.text() == ""
+    assert load_progress() is None
+    kept = draft_from_dict(read_issue_state(issue)["draft"])
+    assert kept.happened == "The ship was gone."
     again.close()
     window.close()
 
@@ -291,4 +292,121 @@ def test_closing_from_the_title_bar_saves_the_more_info_note(qapp, tmp_path, mon
     assert again._detail is not None
     assert again._detail.council_url == "https://issue-council.example/STARC-222067"
     again.close()
+    window.close()
+
+
+def test_my_issues_opens_a_saved_issue_and_stores_its_id(qapp, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("core.capture.REPORTS_ROOT", tmp_path)
+    older = tmp_path / "20261018-090000"
+    newer = tmp_path / "20261018-110000"
+    older.mkdir()
+    newer.mkdir()
+    write_issue_state(older, {
+        "folder": str(older),
+        "page": "search",
+        "description": "older bug",
+        "draft": ReportDraft(mode="new", title="Older title", happened="It failed."),
+    })
+    write_issue_state(newer, {
+        "folder": str(newer),
+        "page": "new",
+        "description": "newer bug",
+        "draft": ReportDraft(mode="new", title="Newer title", issue_id="STARC-9"),
+    })
+    window = _window(qapp)
+    window.show()
+    search_buttons = [button.text() for button in window._pages.widget(0).findChildren(QPushButton)]
+    assert "Contribute to this issue" in search_buttons
+    assert "My Issues" in search_buttons
+    assert "Finish and Save" not in search_buttons
+
+    window._show_mine()
+    titles = [button.text() for button in window._mine.findChildren(QPushButton) if button.toolTip() == "Open issue"]
+    stamps = [label.text() for label in window._mine.findChildren(QLabel)]
+    assert titles == ["Newer title", "Older title"]
+    assert "2026-10-18 11:00:00" in stamps
+    assert "2026-10-18 09:00:00" in stamps
+    edit = window._mine._edits[str(newer)]
+    assert edit.text() == "STARC-9"
+    edit.setText("STARC-15")
+    check = next(button for button in edit.parentWidget().findChildren(QPushButton) if button.toolTip() == "Save issue ID")
+    assert check.icon().isNull() is False
+    check.click()
+    assert draft_from_dict(read_issue_state(newer)["draft"]).issue_id == "STARC-15"
+    delete = next(button for button in edit.parentWidget().findChildren(QPushButton) if button.toolTip() == "Delete issue")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No)
+    delete.click()
+    assert newer.is_dir()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    delete.click()
+    assert not newer.exists()
+
+    opener = next(button for button in window._mine.findChildren(QPushButton) if "Older title" in button.text())
+    opener.click()
+    assert window._folder == str(older)
+    assert window._pages.currentWidget() is window._new
+    assert window._new.title() == "Older title"
+    assert window._new.happened() == "It failed."
+    window._new.set_issue_id("STARC-3")
+
+    class _Session(QObject):
+        context_ready = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        def __init__(self, folder, parent=None) -> None:
+            super().__init__(parent)
+
+        def start(self) -> None:
+            self.finished.emit()
+
+    monkeypatch.setattr("core.issues.REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr("ui.window.SessionTask", _Session)
+    window._finish()
+    assert window._pages.currentIndex() == 0
+    assert window._folder == ""
+    assert "Issue ID:\nSTARC-3" in (older / "report.txt").read_text(encoding="utf-8")
+    window.close()
+
+
+def test_an_issue_folder_is_created_only_from_report_or_contribute(qapp, tmp_path, monkeypatch) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    monkeypatch.setattr("core.issues.REPORTS_ROOT", reports)
+
+    class _Session(QObject):
+        context_ready = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        def __init__(self, folder, parent=None) -> None:
+            super().__init__(parent)
+
+        def start(self) -> None:
+            self.finished.emit()
+
+    created: list[str] = []
+
+    def _make():
+        path = reports / "20261018-120000"
+        path.mkdir()
+        created.append(str(path))
+        return path
+
+    monkeypatch.setattr("ui.window.SessionTask", _Session)
+    monkeypatch.setattr("ui.window.make_issue_dir", _make)
+    window = _window(qapp)
+    window.begin_activation()
+    assert created == []
+    assert window._folder == ""
+    window._description.setText("bed log")
+    window._report_new()
+    assert created == [str(reports / "20261018-120000")]
+    assert window._pages.currentWidget() is window._new
+    assert window._new.title() == "bed log"
+    window._new.set_title("")
+    window._finish()
+    assert not (reports / "20261018-120000").exists()
+    assert window._pages.currentIndex() == 0
+    assert window._status.text() == "Untitled issue discarded."
     window.close()

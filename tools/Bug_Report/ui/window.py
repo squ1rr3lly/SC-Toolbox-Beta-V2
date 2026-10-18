@@ -21,15 +21,19 @@ from shared.qt.title_bar import SCTitleBar
 from core.bugmirror import (
     NEW_ISSUE_URL, IssueDetail, IssueHit, SearchResult, highlight_html, matches_session_build,
 )
-from core.capture import CaptureResult, copy_screenshots_since, make_issue_dir
+from core.capture import REPORTS_ROOT, CaptureResult, adopt_clip, copy_screenshots_since, make_issue_dir
+from core.issues import (
+    discard_issue, discard_untitled, set_issue_id, state_for_open, write_issue_state,
+)
 from core.progress import clear_progress, draft_from_dict, load_progress, save_progress
 from core.report import (
     ReportDraft, existing_description, note_attachments, refresh_session, write_report,
 )
-from core.session import SessionContext, read_context
+from core.session import SessionContext, read_context, write_context
 from core import settings as st
 from ui.forms import MoreInfoForm, NewIssueForm
 from ui.label_picker import LabelPicker
+from ui.my_issues import MyIssuesPage
 from ui.workers import ClipTask, DebugOffTask, DetailTask, SearchTask, SessionTask
 
 log = logging.getLogger(__name__)
@@ -57,6 +61,7 @@ class BugReportWindow(SCWindow):
         self._busy = False
         self._in_progress = False
         self._folder = ""
+        self._loose_clip = ""
         self._clip_started = 0.0
         self._ctx = SessionContext()
         self._hits: list[IssueHit] = []
@@ -75,7 +80,7 @@ class BugReportWindow(SCWindow):
         title.close_clicked.connect(self._on_close)
         self.content_layout.addWidget(title)
 
-        self._status = QLabel("Capture the clip, then choose an existing issue or report a new one.")
+        self._status = QLabel("Capture the clip, then contribute to an issue or report a new one.")
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {P.fg_dim}; padding: 6px 12px;")
         self.content_layout.addWidget(self._status)
@@ -111,6 +116,13 @@ class BugReportWindow(SCWindow):
         self._new.back_requested.connect(self._show_search)
         self._new.changed.connect(self._rewrite_report)
         self._pages.addWidget(self._new)
+        self._mine = MyIssuesPage()
+        self._mine.set_root(REPORTS_ROOT)
+        self._mine.open_requested.connect(self._open_saved)
+        self._mine.id_saved.connect(self._save_listed_id)
+        self._mine.delete_requested.connect(self._delete_listed)
+        self._mine.back_requested.connect(self._show_search)
+        self._pages.addWidget(self._mine)
 
         media = QHBoxLayout()
         media_label = QLabel("Screenshots")
@@ -195,16 +207,16 @@ class BugReportWindow(SCWindow):
         lay.addWidget(splitter, 1)
 
         actions = QHBoxLayout()
-        self._confirm = QPushButton("This is the one")
+        self._confirm = QPushButton("Contribute to this issue")
         self._confirm.setEnabled(False)
         self._confirm.clicked.connect(self._confirm_issue)
         actions.addWidget(self._confirm)
         self._new_issue = QPushButton("Report a new issue")
         self._new_issue.clicked.connect(self._report_new)
         actions.addWidget(self._new_issue)
-        self._finish_search = QPushButton("Finish and Save")
-        self._finish_search.clicked.connect(self._finish)
-        actions.addWidget(self._finish_search)
+        self._my_issues = QPushButton("My Issues")
+        self._my_issues.clicked.connect(self._show_mine)
+        actions.addWidget(self._my_issues)
         actions.addStretch(1)
         lay.addLayout(actions)
         clip_row = QHBoxLayout()
@@ -244,11 +256,14 @@ class BugReportWindow(SCWindow):
         self.begin_activation()
 
     def begin_activation(self) -> None:
-        """Open the tool on a new issue folder. The clip is a separate step."""
+        """Open the tool on the search page. An issue folder waits for Contribute or Report."""
         self._want_visible = True
         if self._busy:
             return
         self._in_progress = False
+        self._folder = ""
+        self._loose_clip = ""
+        discard_untitled()
         self._hits = []
         self._detail = None
         self._list.clear()
@@ -268,21 +283,13 @@ class BugReportWindow(SCWindow):
         self._suspend_rewrite = False
         self._ctx = SessionContext()
         self._show_facts()
-        try:
-            self._folder = str(make_issue_dir())
-        except OSError as exc:
-            self._folder = ""
-            self._status.setText(f"Could not create an issue folder ({exc}).")
-        else:
-            self._in_progress = True
-            self._save_in_progress()
-            self._status.setText("Capture the clip, then choose an existing issue or report a new one.")
-            task = SessionTask(self._folder, self)
-            task.context_ready.connect(self._on_context)
-            task.failed.connect(self._on_capture_failed)
-            task.finished.connect(lambda task=task: self._forget(task))
-            self._tasks.append(task)
-            task.start()
+        self._status.setText("Capture the clip, then contribute to an issue or report a new one.")
+        task = SessionTask("", self)
+        task.context_ready.connect(self._on_context)
+        task.failed.connect(self._on_capture_failed)
+        task.finished.connect(lambda task=task: self._forget(task))
+        self._tasks.append(task)
+        task.start()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -290,7 +297,7 @@ class BugReportWindow(SCWindow):
 
     def _capture_clip(self) -> None:
         """Hide, send Win+Alt+G, then come back. Screenshots after this are kept."""
-        if self._busy or not self._folder:
+        if self._busy:
             return
         self._save_in_progress()
         self._busy = True
@@ -310,19 +317,19 @@ class BugReportWindow(SCWindow):
         if kind == "show":
             self.show_or_resume()
         elif kind == "hide":
-            self._save_in_progress()
+            self._leave()
             self._want_visible = False
             self.hide()
         elif kind == "quit":
-            self._save_in_progress()
+            self._leave()
             self._quit()
 
     def closeEvent(self, event) -> None:
-        self._save_in_progress()
+        self._leave()
         super().closeEvent(event)
 
     def _on_close(self) -> None:
-        self._save_in_progress()
+        self._leave()
         if self._standalone:
             self._quit()
         else:
@@ -367,7 +374,7 @@ class BugReportWindow(SCWindow):
 
     def _on_context(self, payload: tuple) -> None:
         folder, ctx = payload
-        if folder != self._folder:
+        if folder and folder != self._folder:
             try:
                 if not refresh_session(folder, ctx):
                     write_report(folder, ctx, existing_description(folder))
@@ -377,23 +384,47 @@ class BugReportWindow(SCWindow):
             return
         self._ctx = ctx
         self._show_facts()
+        if self._folder and not folder:
+            try:
+                write_context(self._folder, ctx)
+            except OSError as exc:
+                log.warning("bug_report: could not write context: %s", exc)
         self._rewrite_report()
         if not ctx.log_path:
             self._add_note("No Game.log was found, so location and build were left blank.")
 
     def _on_clip(self, payload: tuple) -> None:
         folder, path = payload
-        if folder != self._folder:
+        if folder and folder != self._folder:
             note_attachments(folder)
             return
-        if path:
-            self._add_note("Clip saved.")
-        else:
+        if not path:
             self._add_note(
                 "No Game Bar clip appeared. Win+Alt+G only keeps the last 30 seconds "
                 "when background recording is already on."
             )
+            self._rewrite_report()
+            return
+        if self._folder and os.path.isdir(self._folder):
+            self._store_clip(path)
+        else:
+            self._loose_clip = path
         self._rewrite_report()
+
+    def _store_clip(self, path: str) -> None:
+        if not self._folder:
+            self._loose_clip = path
+            return
+        try:
+            inside = Path(path).resolve().parent == Path(self._folder).resolve()
+        except OSError:
+            inside = False
+        if not inside:
+            adopted = adopt_clip(Path(self._folder), path)
+            path = adopted or ""
+        self._loose_clip = ""
+        if path:
+            self._add_note("Clip saved.")
 
     def _add_note(self, text: str) -> None:
         current = self._status.text()
@@ -487,7 +518,7 @@ class BugReportWindow(SCWindow):
             if self._labels.labels():
                 count += "  Only issues with an included label."
             count += "  Labels count most, then the title, then what happened."
-        self._status.setText(count + "  Select one, or report a new issue.")
+        self._status.setText(count + "  Select one to contribute, or report a new issue.")
 
     def _on_search_failed(self, message: str) -> None:
         self._status.setText(message)
@@ -524,11 +555,19 @@ class BugReportWindow(SCWindow):
     def _confirm_issue(self) -> None:
         if not (self._detail and self._detail.council_url):
             return
+        if not self._ensure_issue_dir():
+            return
         key = self._detail.key or self._detail.bugmirror_key
         if key != self._draft.issue_key:
             self._more.clear()
+            self._draft.issue_id = key
+        elif not self._draft.issue_id.strip():
+            self._draft.issue_id = key
         self._draft.mode = "contribution"
         self._draft.issue_key = key
+        row = self._list.currentRow()
+        hit_title = self._hits[row].description.strip() if 0 <= row < len(self._hits) else ""
+        self._draft.title = hit_title or self._description.text().strip()
         blurb = (self._detail.description or "").strip()
         if len(blurb) > 280:
             blurb = blurb[:277].rstrip() + "…"
@@ -542,6 +581,8 @@ class BugReportWindow(SCWindow):
         ))
 
     def _report_new(self) -> None:
+        if not self._ensure_issue_dir():
+            return
         self._draft.mode = "new"
         if not self._new.title().strip():
             self._new.set_title(self._description.text().strip())
@@ -554,6 +595,7 @@ class BugReportWindow(SCWindow):
         ))
 
     def _show_search(self) -> None:
+        self._leave()
         self._pages.setCurrentIndex(0)
         self._description.setFocus()
 
@@ -635,6 +677,8 @@ class BugReportWindow(SCWindow):
             return "new"
         if current is self._more:
             return "more"
+        if current is self._mine:
+            return "mine"
         return "search"
 
     def _progress_state(self) -> dict:
@@ -661,18 +705,83 @@ class BugReportWindow(SCWindow):
         """Write the report and the resume file. A finished issue is left as it is."""
         if not self._in_progress or not self._folder or not os.path.isdir(self._folder):
             return
+        if self._untitled():
+            return
         self._rewrite_report()
         try:
-            save_progress(self._progress_state())
+            state = self._progress_state()
+            save_progress(state)
+            write_issue_state(self._folder, state)
         except OSError as exc:
             log.warning("bug_report: could not save the in-progress issue: %s", exc)
 
-    def _apply_progress(self, saved: dict | None) -> bool:
+    def _leave(self) -> None:
+        """Save a titled issue. An untitled one is deleted."""
+        if not self._folder or not os.path.isdir(self._folder):
+            return
+        if self._untitled():
+            self._discard_current()
+            return
+        self._save_in_progress()
+
+    def _untitled(self) -> bool:
+        self._capture_draft()
+        if self._draft.mode == "contribution":
+            return not self._draft.issue_key.strip()
+        if self._draft.mode == "new":
+            return not self._new.title().strip()
+        return True
+
+    def _discard_current(self) -> None:
+        folder = self._folder
+        self._in_progress = False
+        self._folder = ""
+        self._loose_clip = ""
+        clear_progress()
+        self._suspend_rewrite = True
+        self._draft = ReportDraft()
+        self._more.clear()
+        self._new.clear()
+        self._suspend_rewrite = False
+        if folder:
+            discard_issue(folder)
+
+    def _ensure_issue_dir(self) -> bool:
+        """Create the issue folder the first time Contribute or Report is chosen."""
+        if self._folder and os.path.isdir(self._folder):
+            return True
+        try:
+            self._folder = str(make_issue_dir())
+        except OSError as exc:
+            self._folder = ""
+            self._status.setText(f"Could not create an issue folder ({exc}).")
+            return False
+        self._in_progress = True
+        try:
+            write_context(self._folder, self._ctx)
+        except OSError as exc:
+            log.warning("bug_report: could not write context: %s", exc)
+        if self._loose_clip:
+            self._store_clip(self._loose_clip)
+        return True
+
+    def _show_issue_form(self) -> None:
+        if self._draft.mode == "contribution":
+            self._pages.setCurrentWidget(self._more)
+            self._more.focus_edit()
+            return
+        self._draft.mode = "new"
+        self._new.restore(self._draft)
+        self._pages.setCurrentWidget(self._new)
+        self._new.focus_first()
+
+    def _apply_progress(self, saved: dict | None, *, clear_missing: bool = True) -> bool:
         if not saved:
             return False
         folder = str(saved.get("folder") or "")
         if not folder or not os.path.isdir(folder):
-            clear_progress()
+            if clear_missing:
+                clear_progress()
             return False
         draft = draft_from_dict(saved.get("draft"))
         draft.description = str(saved.get("description") or draft.description)
@@ -700,6 +809,9 @@ class BugReportWindow(SCWindow):
             self._pages.setCurrentWidget(self._new)
         elif page == "more":
             self._pages.setCurrentWidget(self._more)
+        elif page == "mine":
+            self._pages.setCurrentWidget(self._mine)
+            self._mine.reload()
         else:
             self._pages.setCurrentIndex(0)
         self._suspend_rewrite = False
@@ -707,15 +819,87 @@ class BugReportWindow(SCWindow):
         return True
 
     def _finish(self) -> None:
-        """Save the issue and stop bringing it back the next time the window opens."""
-        if self._in_progress and self._folder:
+        """Save a titled issue and return to search. An untitled one is deleted."""
+        untitled = bool(self._folder) and self._untitled()
+        if untitled:
+            self._discard_current()
+        elif self._folder and os.path.isdir(self._folder):
             self._rewrite_report()
-        self._in_progress = False
-        try:
+            try:
+                write_issue_state(self._folder, self._progress_state())
+            except OSError as exc:
+                log.warning("bug_report: could not finish the issue: %s", exc)
+            self._in_progress = False
+            self._folder = ""
             clear_progress()
+        self.begin_activation()
+        if untitled:
+            self._status.setText("Untitled issue discarded.")
+        else:
+            self._status.setText(
+                "Saved. Capture the clip, then contribute to an issue or report a new one."
+            )
+
+    def _show_mine(self) -> None:
+        self._leave()
+        from core import capture
+        self._mine.set_root(capture.REPORTS_ROOT)
+        self._mine.reload()
+        self._pages.setCurrentWidget(self._mine)
+        self._status.setText("Newest issues are at the top. The checkmark saves an issue ID.")
+
+    def _open_saved(self, folder: str) -> None:
+        if not self._same_folder(folder):
+            self._leave()
+        state = state_for_open(folder)
+        if not state or not self._apply_progress(state, clear_missing=False):
+            self._status.setText("That issue folder is missing.")
+            return
+        self._show_issue_form()
+        self._save_in_progress()
+        self._status.setText("Opened the saved issue.")
+
+    def _save_listed_id(self, folder: str, issue_id: str) -> None:
+        try:
+            saved = set_issue_id(folder, issue_id)
         except OSError as exc:
-            log.warning("bug_report: could not finish the issue: %s", exc)
-        self._status.setText("Saved. Opening Bug Report again starts a new issue.")
+            log.warning("bug_report: could not save the issue id: %s", exc)
+            self._status.setText("Could not save the issue ID.")
+            return
+        if self._same_folder(folder):
+            self._draft.issue_id = saved
+            self._suspend_rewrite = True
+            self._new.set_issue_id(saved)
+            self._suspend_rewrite = False
+            if self._in_progress:
+                self._save_in_progress()
+        self._status.setText("Saved the issue ID." if saved else "Cleared the issue ID.")
+
+    def _delete_listed(self, folder: str) -> None:
+        if self._same_folder(folder):
+            self._in_progress = False
+            self._folder = ""
+            self._loose_clip = ""
+            clear_progress()
+            self._suspend_rewrite = True
+            self._draft = ReportDraft()
+            self._more.clear()
+            self._new.clear()
+            self._suspend_rewrite = False
+        saved = load_progress()
+        if saved and self._same_path(str(saved.get("folder") or ""), folder):
+            clear_progress()
+        discard_issue(folder)
+        self._mine.reload()
+        self._status.setText("Deleted the issue.")
+
+    def _same_path(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+    def _same_folder(self, folder: str) -> bool:
+        return self._same_path(self._folder, folder)
 
     def _capture_draft(self) -> None:
         self._draft.description = self._description.text()

@@ -322,9 +322,9 @@ def _unused_name(folder: Path, name: str) -> Path:
         number += 1
 
 
-def copy_new_clip(folder: Path, before: set[str], started: float,
+def find_new_clip(before: set[str], started: float,
                   timeout: float = _CLIP_TIMEOUT_S) -> str | None:
-    """Wait for a new Game Bar video and copy it into *folder*. None if none appears."""
+    """Wait until a new Game Bar video finishes writing. None if none appears."""
     dirs = captures_directories()
     if not dirs:
         return None
@@ -332,16 +332,39 @@ def copy_new_clip(folder: Path, before: set[str], started: float,
     while time.time() < deadline:
         clip = pick_new_clip(dirs, before, started)
         if clip is not None and _size_settled(clip):
-            dest = folder / f"clip{clip.suffix.lower()}"
-            try:
-                shutil.copy2(clip, dest)
-            except OSError as exc:
-                log.warning("bug_report: could not copy %s: %s", clip, exc)
-                time.sleep(0.4)
-                continue
-            return str(dest)
+            return str(clip)
         time.sleep(0.4)
     return None
+
+
+def adopt_clip(folder: Path, source: str) -> str | None:
+    """Copy a Game Bar video into *folder*. A file already there is kept."""
+    src = Path(source)
+    try:
+        if not src.is_file():
+            return None
+        if src.resolve().parent == folder.resolve():
+            return str(src)
+    except OSError:
+        return None
+    dest = folder / f"clip{src.suffix.lower()}"
+    if dest.exists():
+        dest = _unused_name(folder, dest.name)
+    try:
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        log.warning("bug_report: could not copy %s: %s", src, exc)
+        return None
+    return str(dest)
+
+
+def copy_new_clip(folder: Path, before: set[str], started: float,
+                  timeout: float = _CLIP_TIMEOUT_S) -> str | None:
+    """Wait for a new Game Bar video and copy it into *folder*. None if none appears."""
+    found = find_new_clip(before, started, timeout)
+    if not found:
+        return None
+    return adopt_clip(folder, found)
 
 
 def disable_debug(console_key: str) -> str:

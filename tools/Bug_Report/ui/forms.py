@@ -306,6 +306,12 @@ class NewIssueForm(QWidget):
         form.setContentsMargins(0, 0, 8, 0)
         form.setSpacing(6)
 
+        form.addWidget(_dim("Issue ID"))
+        self._issue_id = QLineEdit()
+        self._issue_id.setPlaceholderText("STARC-…")
+        self._issue_id.textChanged.connect(lambda _text: self.changed.emit())
+        form.addWidget(self._issue_id)
+
         form.addWidget(_dim("Issue title"))
         self._title = QLineEdit()
         self._title.setPlaceholderText("Short title other players will search for")
@@ -356,6 +362,7 @@ class NewIssueForm(QWidget):
         self._happened.textChanged.connect(self.changed.emit)
         self._expected.textChanged.connect(self.changed.emit)
         self._workaround.textChanged.connect(lambda _text: self.changed.emit())
+        self._issue_id.returnPressed.connect(self._title.setFocus)
         self._title.returnPressed.connect(self._category.setFocus)
         self._workaround.returnPressed.connect(self.submit_requested.emit)
         form.addStretch(1)
@@ -365,6 +372,12 @@ class NewIssueForm(QWidget):
         root.addWidget(_dim("Ctrl+Enter saves the report and opens the new-issue page."))
         root.addLayout(self._button_row())
         _submit_shortcut(self, self.submit_requested.emit)
+
+    def issue_id(self) -> str:
+        return self._issue_id.text()
+
+    def set_issue_id(self, text: str) -> None:
+        self._issue_id.setText(text)
 
     def title(self) -> str:
         return self._title.text()
@@ -399,8 +412,10 @@ class NewIssueForm(QWidget):
         draft.happened = self.happened()
         draft.expected = self.expected()
         draft.workaround = self.workaround()
+        draft.issue_id = self.issue_id().strip()
 
     def restore(self, draft: ReportDraft) -> None:
+        self.set_issue_id(draft.issue_id)
         self.set_title(draft.title)
         self._category.setEditText(draft.category)
         index = self._severity.findText(draft.severity)
@@ -412,6 +427,7 @@ class NewIssueForm(QWidget):
         self._workaround.setText(draft.workaround)
 
     def clear(self) -> None:
+        self._issue_id.clear()
         self._title.clear()
         self._category.setEditText("")
         self._severity.setCurrentIndex(1)

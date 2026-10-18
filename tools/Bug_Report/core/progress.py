@@ -31,7 +31,7 @@ def draft_from_dict(data: Any) -> ReportDraft:
     steps = values.get("steps")
     values["steps"] = [str(step) for step in steps] if isinstance(steps, list) else []
     for key in ("mode", "description", "issue_key", "more_info", "title", "category",
-                "severity", "happened", "expected", "workaround"):
+                "severity", "happened", "expected", "workaround", "issue_id"):
         if key in values and not isinstance(values[key], str):
             values[key] = str(values[key] or "")
     return ReportDraft(**values)

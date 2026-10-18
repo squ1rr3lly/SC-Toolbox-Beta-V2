@@ -67,6 +67,7 @@ class ReportDraft:
     happened: str = ""
     expected: str = ""
     workaround: str = ""
+    issue_id: str = ""
 
 
 def attachment_names(folder: str | os.PathLike) -> list[str]:
@@ -220,6 +221,8 @@ def _render_contribution(
     head = "Star Citizen bug report\n"
     if draft.issue_key:
         head += f"Contributing to: {draft.issue_key}\n"
+    if draft.issue_id.strip():
+        head += f"Issue ID: {draft.issue_id.strip()}\n"
     return (
         f"{head}"
         "\n"
@@ -252,8 +255,12 @@ def _render_new(
     expected = _block(draft.expected) or "(not written yet)"
     workaround = _block(draft.workaround) or "(none)"
     desc = _one_line(description or draft.description) or "(not written yet)"
+    issue_id = _one_line(draft.issue_id) or "(not set)"
     return (
         "Star Citizen bug report\n"
+        "\n"
+        "Issue ID:\n"
+        f"{issue_id}\n"
         "\n"
         "Issue title:\n"
         f"{title}\n"
