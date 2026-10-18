@@ -141,3 +141,88 @@ def test_mission_cargo_brush(win):
     assert len(colours) == 10
     assert items[10:12] == ["Hydrogen Fuel", "Quantum Fuel"]
     assert cargo_app.commodity_color("Quantum Fuel") == "#c77dff"
+
+
+def test_max_container_size_draws_the_blocker_cells(win):
+    from cargo_engine.blockers import blocker_cells
+    assert win._cap_combo.currentData() is None
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    QtWidgets.QApplication.processEvents()
+    expected = set(blocker_cells(6, 2, 8, 8, slot_max=32))
+    drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
+    assert drawn == expected
+    assert all(b[3:7] == (1, 1, 1, 1) for b in win._renderer._manual_boxes)
+    assert "8 SCU" in win._status_lbl.text()
+
+
+def test_a_cap_box_cannot_be_removed(win):
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    box = win._renderer._manual_boxes[0]
+    win._remove_box(box)
+    assert box in win._renderer._manual_boxes
+    assert "Off" in win._status_lbl.text()
+
+
+def test_off_removes_the_cap_boxes_and_leaves_the_others(win):
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(4))
+    extra = (0, 0, 0, 1, 1, 1, 1)
+    win._renderer._manual_boxes = list(win._renderer._manual_boxes) + [extra]
+    win._cap_combo.setCurrentIndex(0)
+    assert win._cap_size is None
+    assert win._renderer._manual_boxes == [extra]
+
+
+def test_clear_turns_the_cap_off(win):
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    win._clear_containers()
+    assert win._cap_size is None
+    assert not win._renderer._manual_boxes
+
+
+def test_cap_asks_before_replacing_hand_boxes(win, monkeypatch):
+    win._renderer._manual_boxes = [(0, 0, 0, 1, 1, 1, 1)]
+    win._sync_counts_from_boxes()
+    monkeypatch.setattr(win, "_ask_reorganise", lambda text: False)
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    assert win._cap_size is None
+    assert win._renderer._manual_boxes == [(0, 0, 0, 1, 1, 1, 1)]
+
+
+def test_an_item_cell_is_not_marked_again(win, monkeypatch):
+    from cargo_engine.blockers import blocker_cells
+    monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
+    win._renderer._items = [(1, 1, 1, 1, 1, 1, "pod")]
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(4))
+    expected = set(blocker_cells(6, 2, 8, 4, slot_max=32))
+    assert (1, 1, 1) in expected
+    drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
+    assert drawn == expected - {(1, 1, 1)}
+
+
+def test_changing_ship_recomputes_the_cap(win, monkeypatch):
+    from cargo_engine.blockers import blocker_cells
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    other = {
+        "name": "Other Hold", "manufacturer": "Test", "capacity": 32,
+        "provenance": {"source": "scunpacked-data"},
+        "groups": [{"x": 0, "z": 0, "grids": [
+            {"x": 0, "z": 0, "width": 4, "height": 2, "length": 4,
+             "minSize": 1, "maxSize": 32},
+        ]}],
+    }
+    monkeypatch.setattr(
+        win._data, "find",
+        lambda name: dict(other) if "Other" in name else dict(SHIP))
+    win._load_ship("Other Hold")
+    expected = set(blocker_cells(4, 2, 4, 8, slot_max=32))
+    drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
+    assert drawn == expected and win._cap_size == 8
+
+
+def test_switching_to_auto_drops_the_cap(win, monkeypatch):
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
+    win._set_mode("auto")
+    assert win._mode == "auto" and win._cap_size is None
+    assert win._blocker_cells == set()
+

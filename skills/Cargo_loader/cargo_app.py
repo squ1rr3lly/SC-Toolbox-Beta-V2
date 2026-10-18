@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPolygonItem, QGraphicsTextItem,
     QGraphicsItemGroup, QDialog, QFileDialog,
     QApplication, QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QSlider,
-    QMessageBox,
+    QMessageBox, QComboBox,
 )
 
 # Bootstrap project root and skill directory
@@ -56,6 +56,7 @@ from shared.api_config import (
 
 from cargo_engine.schema import CONTAINER_SIZES, CONTAINER_COLORS, CONTAINER_DIMS
 from cargo_engine.placement import best_rotation, max_containers_in_slot
+from cargo_engine.blockers import blocker_cells
 from cargo_engine.packing import (
     place_containers_3d, build_slots, slot_blocked_cells, fill_slot_around,
 )
@@ -1854,6 +1855,9 @@ are a reminder of whichever mode you are in.</p>
       column is the SCU that size contributes.</li>
   <li>The count is capped to what the ship can physically hold in that size,
       and to the capacity left after the other sizes.</li>
+  <li><b>Max container size</b> — the largest box you want on this grid.
+      The view marks the 1 SCU boxes to place so nothing larger can land.
+      Choose Off to take those boxes away.</li>
 </ul>
 
 <b style="color:#c8d4e8">Buttons</b>
@@ -2206,6 +2210,10 @@ class CargoApp(SCWindow):
         # Drag-and-drop state
         self._drag: dict | None = None
         self._move_undo: list[tuple] = []   # (manual_boxes_before, assignments_before)
+        # Largest container Auto may use, or None when the cap is off.
+        # _blocker_cells are the 1 SCU boxes holding that cap; they stay put.
+        self._cap_size: int | None = None
+        self._blocker_cells: set[tuple] = set()
 
         self._build_ui()
         for d in crate_items.crate_defs():
@@ -2680,6 +2688,35 @@ class CargoApp(SCWindow):
             f"color: {YELLOW}; font-family: Consolas; font-size: 8pt; background: transparent;"
         )
         pad_lay.addWidget(self._mode_hint)
+        pad_lay.addSpacing(4)
+
+        # Largest box the grid should accept. The 1 SCU marks are drawn below.
+        cap_lbl = QLabel(_("Max container size"), pad)
+        cap_lbl.setStyleSheet(
+            f"color: {FG_DIM}; font-family: Consolas; font-size: 8pt; background: transparent;"
+        )
+        pad_lay.addWidget(cap_lbl)
+        self._cap_combo = QComboBox(pad)
+        self._cap_combo.addItem(_("Off"), None)
+        for size in CONTAINER_SIZES:
+            self._cap_combo.addItem(f"{size} SCU", size)
+        self._cap_combo.setCursor(Qt.PointingHandCursor)
+        self._cap_combo.setToolTip(
+            _("Mark the 1 SCU boxes that stop a larger container fitting"))
+        self._cap_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {BG3}; color: {FG};
+                font-family: Consolas; font-size: 9pt;
+                border: 1px solid {BORDER}; padding: 3px 6px;
+            }}
+            QComboBox:hover {{ border-color: {ACCENT}; }}
+            QComboBox QAbstractItemView {{
+                background-color: {BG3}; color: {FG};
+                selection-background-color: {ACCENT}; selection-color: {BG};
+            }}
+        """)
+        self._cap_combo.currentIndexChanged.connect(self._on_cap_changed)
+        pad_lay.addWidget(self._cap_combo)
         pad_lay.addSpacing(4)
 
         # Container rows
@@ -3772,6 +3809,7 @@ class CargoApp(SCWindow):
         if not ship:
             self._status_lbl.setText(f"Ship not found: '{name}'")
             return
+        kept_cap = self._cap_size
         self._current_ship = ship
         self._ship_combo.set_text(ship["name"])
 
@@ -3819,6 +3857,16 @@ class CargoApp(SCWindow):
 
         if self._pending_loadout:
             self._apply_pending_loadout()
+        elif kept_cap is not None:
+            # Clear / Reset / Optimize above turned the cap off with the old
+            # hold. Put the same cap back on this ship's grids.
+            self._cap_size = kept_cap
+            self._sync_cap_combo()
+            if self._mode != "manual":
+                self._mode = "manual"
+                self._set_place_size(None)
+                self._refresh_mode_ui()
+            self._show_blockers()
 
     def _show_tutorial(self) -> None:
         """Show (or raise) the tutorial popup anchored to the refresh button."""
@@ -4041,6 +4089,9 @@ class CargoApp(SCWindow):
             index = items.index(box) if item else boxes.index(box)
         except ValueError:
             return False
+        if not item and self._is_cap_box(box):
+            self._status_lbl.setText(self._cap_locked_message())
+            return False
         if item:
             others = boxes + items[:index] + items[index + 1:]
         else:
@@ -4242,6 +4293,109 @@ class CargoApp(SCWindow):
                 _("Type how many of each size,"),
                 _("then press Optimize."))))
 
+    def _sync_cap_combo(self) -> None:
+        """Show `_cap_size` on the dropdown without applying it again."""
+        combo = self._cap_combo
+        combo.blockSignals(True)
+        for i in range(combo.count()):
+            if combo.itemData(i) == self._cap_size:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
+
+    def _forget_cap(self) -> None:
+        """Drop the cap. The caller removes or replaces the boxes."""
+        if self._cap_size is None and not self._blocker_cells:
+            return
+        self._cap_size = None
+        self._blocker_cells = set()
+        self._sync_cap_combo()
+
+    def _is_cap_box(self, box: tuple) -> bool:
+        if not self._blocker_cells or len(box) < 7 or box[6] != 1:
+            return False
+        return (box[0], box[1], box[2]) in self._blocker_cells
+
+    def _cap_locked_message(self) -> str:
+        return _("This 1 SCU holds the size cap. Set Max container size to Off to remove it.")
+
+    def _make_blocker_boxes(self) -> list[tuple]:
+        """1 SCU boxes for the current cap, skipping cells an item already occupies."""
+        x_min, z_min = self._bounds[0], self._bounds[1]
+        items = list(self._renderer._items)
+        boxes: list[tuple] = []
+        cells: set[tuple] = set()
+        for slot in self._slots:
+            local = blocker_cells(
+                slot["w"], slot["h"], slot["l"], self._cap_size, slot.get("maxSize"),
+            )
+            x0 = slot["x"] - x_min
+            y0 = slot.get("y0", 0)
+            z0 = slot["z"] - z_min
+            taken = slot_blocked_cells(x0, y0, z0, slot, items) if items else set()
+            for lx, ly, lz in local:
+                if (lx, ly, lz) in taken:
+                    continue
+                pos = (x0 + lx, y0 + ly, z0 + lz)
+                boxes.append((*pos, 1, 1, 1, 1))
+                cells.add(pos)
+        self._blocker_cells = cells
+        return boxes
+
+    def _show_blockers(self) -> None:
+        """Replace the containers with the 1 SCU marks for `_cap_size`."""
+        if not self._cap_size or not self._slots:
+            return
+        self._set_place_size(None)
+        boxes = self._make_blocker_boxes()
+        self._move_undo.clear()
+        self._renderer._manual_boxes = boxes
+        self._renderer._assignments = {
+            k: v for k, v in self._renderer._assignments.items()
+            if not (len(k) >= 4 and isinstance(k[3], int))
+        }
+        self._sync_counts_from_boxes()
+        self._render_grid()
+        self._update_assignment_summary()
+        self._status_lbl.setText(
+            _("{n} \u00d7 1 SCU \u2014 Auto cannot place anything over {cap} SCU").format(
+                n=len(boxes), cap=self._cap_size))
+
+    def _lift_blockers(self, cells: set) -> None:
+        """Take the cap's 1 SCU boxes off the grid. Other boxes stay."""
+        boxes = self._renderer._manual_boxes
+        if not boxes or not cells:
+            return
+        self._renderer._manual_boxes = [
+            b for b in boxes if (b[0], b[1], b[2]) not in cells
+        ]
+        self._sync_counts_from_boxes()
+        self._render_grid()
+        self._update_assignment_summary()
+
+    def _on_cap_changed(self, _index: int = 0) -> None:
+        size = self._cap_combo.currentData()
+        if size == self._cap_size:
+            return
+        if size is None:
+            cells = set(self._blocker_cells)
+            self._cap_size = None
+            self._blocker_cells = set()
+            self._lift_blockers(cells)
+            self._status_lbl.setText(_("Max container size off"))
+            return
+        if not self._confirm_reorganise(_("Max container size")):
+            self._sync_cap_combo()
+            self._status_lbl.setText(
+                _("Max container size not changed  \u00b7  nothing was moved"))
+            return
+        self._cap_size = int(size)
+        if self._mode != "manual":
+            self._mode = "manual"
+            self._set_place_size(None)
+            self._refresh_mode_ui()
+        self._show_blockers()
+
     def _set_mode(self, mode: str) -> None:
         if mode == self._mode:
             self._refresh_mode_ui()
@@ -4261,6 +4415,7 @@ class CargoApp(SCWindow):
             self._status_lbl.setText(_("Manual: click a size, then the grid"))
         else:
             self._set_place_size(None)
+            self._forget_cap()
             self._drop_manual_layout()
             self._update_fill()
             self._status_lbl.setText(_("Auto: counts are packed for you"))
@@ -4286,6 +4441,7 @@ class CargoApp(SCWindow):
             return
         self._mode = "auto"
         self._set_place_size(None)
+        self._forget_cap()
         self._drop_manual_layout()
         self._refresh_mode_ui()
         self._status_lbl.setText(_("Typed a count \u2014 switched to Auto"))
@@ -4617,6 +4773,9 @@ class CargoApp(SCWindow):
             return
         boxes = list(self._renderer._manual_boxes or [])
         if box not in boxes:
+            return
+        if self._is_cap_box(box):
+            self._status_lbl.setText(self._cap_locked_message())
             return
         boxes.remove(box)
         x, y, z, w, h, l, size = box
@@ -5184,6 +5343,7 @@ class CargoApp(SCWindow):
                 # clears the undo stack, and the dialog promised Ctrl+Z.
                 self._push_undo()
                 undo = self._move_undo.pop()
+            self._forget_cap()
         try:
             if self._renderer._items:
                 self._optimize_around_items()
@@ -5257,6 +5417,7 @@ class CargoApp(SCWindow):
                     n=len(items), scu=sum(sz * k for sz, k in totals.items())))
 
     def _reset_containers(self) -> None:
+        self._forget_cap()
         self._drop_manual_layout()
         for s in CONTAINER_SIZES:
             self._spinboxes[s].blockSignals(True)
@@ -5310,6 +5471,7 @@ class CargoApp(SCWindow):
         return True
 
     def _clear_containers(self) -> None:
+        self._forget_cap()
         self._drop_manual_layout()
         for s in CONTAINER_SIZES:
             self._spinboxes[s].blockSignals(True)
