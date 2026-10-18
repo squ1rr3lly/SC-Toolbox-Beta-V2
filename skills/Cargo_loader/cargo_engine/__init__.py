@@ -18,6 +18,7 @@ from cargo_engine.schema import (
 from cargo_engine.placement import best_rotation, max_containers_in_slot
 from cargo_engine.collision import OccupancyGrid
 from cargo_engine.packing import place_containers_3d, build_slots
+from cargo_engine.blockers import blocker_cells
 from cargo_engine.optimizer import greedy_optimize_3d, assign_slots_from_counts
 from cargo_engine.validation import validate_layout, validate_placement, ValidationError
 
@@ -34,6 +35,7 @@ __all__ = [
     "OccupancyGrid",
     "place_containers_3d",
     "build_slots",
+    "blocker_cells",
     "greedy_optimize_3d",
     "assign_slots_from_counts",
     "validate_layout",
