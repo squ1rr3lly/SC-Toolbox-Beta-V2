@@ -1,0 +1,11 @@
+{
+  "id": "bug_report",
+  "name": "Bug Report",
+  "summary": "Search Bugmirror, capture a 30-second clip, and open an Issue Council report. Screenshots taken after the clip are included.",
+  "icon": "🐞",
+  "color": "#ff6644",
+  "folder": "Bug_Report",
+  "script": "bug_report_app.py",
+  "hotkey": "<ctrl>+8",
+  "settings_key": "hotkey_bug_report"
+}
