@@ -223,6 +223,7 @@ class MoreInfoForm(QWidget):
     """The More info box on an existing Issue Council report."""
 
     submit_requested = Signal()
+    finish_requested = Signal()
     back_requested = Signal()
     changed = Signal()
 
@@ -255,6 +256,12 @@ class MoreInfoForm(QWidget):
     def more_info(self) -> str:
         return self._edit.toPlainText()
 
+    def set_note(self, text: str) -> None:
+        self._edit.setPlainText(text)
+
+    def blurb(self) -> str:
+        return self._blurb.text()
+
     def clear(self) -> None:
         self._edit.clear()
         self.set_issue("", "")
@@ -268,8 +275,11 @@ class MoreInfoForm(QWidget):
         back.clicked.connect(self.back_requested.emit)
         save = QPushButton(save_label)
         save.clicked.connect(self.submit_requested.emit)
+        finish = QPushButton("Finish and Save")
+        finish.clicked.connect(self.finish_requested.emit)
         row.addWidget(back)
         row.addWidget(save)
+        row.addWidget(finish)
         row.addStretch(1)
         return row
 
@@ -278,6 +288,7 @@ class NewIssueForm(QWidget):
     """The new-issue fields, in the order Issue Council asks for them."""
 
     submit_requested = Signal()
+    finish_requested = Signal()
     back_requested = Signal()
     changed = Signal()
 
@@ -389,6 +400,17 @@ class NewIssueForm(QWidget):
         draft.expected = self.expected()
         draft.workaround = self.workaround()
 
+    def restore(self, draft: ReportDraft) -> None:
+        self.set_title(draft.title)
+        self._category.setEditText(draft.category)
+        index = self._severity.findText(draft.severity)
+        if index >= 0:
+            self._severity.setCurrentIndex(index)
+        self._steps.set_steps(draft.steps)
+        self._happened.setPlainText(draft.happened)
+        self._expected.setPlainText(draft.expected)
+        self._workaround.setText(draft.workaround)
+
     def clear(self) -> None:
         self._title.clear()
         self._category.setEditText("")
@@ -433,7 +455,10 @@ class NewIssueForm(QWidget):
         back.clicked.connect(self.back_requested.emit)
         save = QPushButton("Save and open issue")
         save.clicked.connect(self.submit_requested.emit)
+        finish = QPushButton("Finish and Save")
+        finish.clicked.connect(self.finish_requested.emit)
         row.addWidget(back)
         row.addWidget(save)
+        row.addWidget(finish)
         row.addStretch(1)
         return row

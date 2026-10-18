@@ -64,7 +64,7 @@ def main() -> None:
         watcher.start(QThread.NormalPriority)
 
     if not preload:
-        QTimer.singleShot(0, window.begin_activation)
+        QTimer.singleShot(0, window.show_or_resume)
 
     sys.exit(app.exec())
 

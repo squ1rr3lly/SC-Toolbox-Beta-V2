@@ -196,3 +196,99 @@ def test_results_show_the_total_and_highlight_matched_text(qapp) -> None:
     assert '<span class="hit">BedLogging</span>' in html
     assert "match" not in html.lower()
     window.close()
+
+
+def _progress(monkeypatch, tmp_path):
+    monkeypatch.setattr("core.progress._PATH", tmp_path / "in_progress.json")
+
+
+def test_hiding_saves_the_form_and_reopening_returns_to_it(qapp, tmp_path, monkeypatch) -> None:
+    _progress(monkeypatch, tmp_path)
+    issue = tmp_path / "issue"
+    issue.mkdir()
+    window = _window(qapp)
+    window._folder = str(issue)
+    window._in_progress = True
+    window._clip_started = 1234.5
+    window._description.setText("bed log fails")
+    window._labels.set_labels(["PyroII-CheckmateStation"])
+    window.show()
+    window._report_new()
+    window._new._happened.setPlainText("The ship was gone.")
+    window._new._steps.set_steps(["Lie down"])
+    window._new._category.setEditText("Ships")
+    window.handle_ipc_command({"type": "hide"})
+    assert not window.isVisible()
+    report = (issue / "report.txt").read_text(encoding="utf-8")
+    assert "The ship was gone." in report
+    assert "1. Lie down" in report
+
+    again = _window(qapp)
+    again.show_or_resume()
+    assert again._folder == str(issue)
+    assert again._pages.currentWidget() is again._new
+    assert again._new.happened() == "The ship was gone."
+    assert again._new.steps() == ["Lie down"]
+    assert again._new.category() == "Ships"
+    assert again._description.text() == "bed log fails"
+    assert again._labels.labels() == ["PyroII-CheckmateStation"]
+    assert again._clip_started == 1234.5
+    assert again.isVisible()
+
+    made: list[str] = []
+
+    class _Session(QObject):
+        context_ready = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        def __init__(self, folder, parent=None) -> None:
+            super().__init__(parent)
+            made.append(str(folder))
+
+        def start(self) -> None:
+            self.finished.emit()
+
+    fresh = tmp_path / "fresh"
+    monkeypatch.setattr("ui.window.make_issue_dir", lambda: fresh)
+    monkeypatch.setattr("ui.window.SessionTask", _Session)
+    again._finish()
+    assert not (tmp_path / "in_progress.json").exists()
+    again.handle_ipc_command({"type": "hide"})
+    again.show_or_resume()
+    assert made == [str(fresh)]
+    assert again._pages.currentIndex() == 0
+    assert again._description.text() == ""
+    again.close()
+    window.close()
+
+
+def test_closing_from_the_title_bar_saves_the_more_info_note(qapp, tmp_path, monkeypatch) -> None:
+    _progress(monkeypatch, tmp_path)
+    issue = tmp_path / "issue"
+    issue.mkdir()
+    window = _window(qapp)
+    window._folder = str(issue)
+    window._in_progress = True
+    window._detail = IssueDetail(
+        key="STARC-222067",
+        description="Cannot bed log.",
+        council_url="https://issue-council.example/STARC-222067",
+    )
+    window.show()
+    window._confirm_issue()
+    window._more.set_note("Happens every time.")
+    window._standalone = True
+    monkeypatch.setattr(window, "_quit", lambda: None)
+    window._on_close()
+
+    text = (issue / "report.txt").read_text(encoding="utf-8")
+    assert "Happens every time." in text
+    again = _window(qapp)
+    again.show_or_resume()
+    assert again._pages.currentWidget() is again._more
+    assert again._more.more_info() == "Happens every time."
+    assert again._detail is not None
+    assert again._detail.council_url == "https://issue-council.example/STARC-222067"
+    again.close()
+    window.close()

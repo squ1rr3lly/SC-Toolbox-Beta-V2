@@ -115,6 +115,27 @@ def write_context(folder: str | os.PathLike, ctx: SessionContext) -> str:
     return dest
 
 
+def read_context(folder: str | os.PathLike) -> SessionContext:
+    """The session snapshot already saved in the issue folder, or a blank one."""
+    dest = os.path.join(os.fspath(folder), "context.json")
+    try:
+        with open(dest, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return SessionContext()
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("bug_report: context unreadable (%s)", exc)
+        return SessionContext()
+    if not isinstance(data, dict):
+        return SessionContext()
+    known = {name for name in SessionContext.__dataclass_fields__}
+    values = {key: data[key] for key in known if key in data}
+    try:
+        return SessionContext(**values)
+    except TypeError:
+        return SessionContext()
+
+
 def _apply_line(ctx: SessionContext, line: str) -> None:
     if not ctx.build:
         found = _BUILD_RE.search(line)

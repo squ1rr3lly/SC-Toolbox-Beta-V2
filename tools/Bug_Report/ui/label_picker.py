@@ -119,6 +119,18 @@ class LabelPicker(QWidget):
                 found.append(token)
         return found
 
+    def set_labels(self, labels: list[str]) -> None:
+        chosen: list[str] = []
+        for label in labels:
+            text = str(label).strip()
+            if text and text not in chosen:
+                chosen.append(text)
+        if chosen == self._chosen:
+            return
+        self._chosen = chosen
+        self._rebuild_chips()
+        self.changed.emit()
+
     def clear_chosen(self) -> None:
         if not self._chosen:
             return

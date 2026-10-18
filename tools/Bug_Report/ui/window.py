@@ -22,10 +22,11 @@ from core.bugmirror import (
     NEW_ISSUE_URL, IssueDetail, IssueHit, SearchResult, highlight_html, matches_session_build,
 )
 from core.capture import CaptureResult, copy_screenshots_since, make_issue_dir
+from core.progress import clear_progress, draft_from_dict, load_progress, save_progress
 from core.report import (
     ReportDraft, existing_description, note_attachments, refresh_session, write_report,
 )
-from core.session import SessionContext
+from core.session import SessionContext, read_context
 from core import settings as st
 from ui.forms import MoreInfoForm, NewIssueForm
 from ui.label_picker import LabelPicker
@@ -37,7 +38,7 @@ ACCENT = "#ff6644"
 
 
 class BugReportWindow(SCWindow):
-    """One activation is one issue folder. The window stays hidden until the shot is taken."""
+    """One issue folder stays in progress until Finish and Save."""
 
     def __init__(
         self, geometry, hotkey_text: str = "", cmd_file: Optional[str] = None,
@@ -54,6 +55,7 @@ class BugReportWindow(SCWindow):
         self._standalone = not cmd_file or cmd_file == os.devnull
         self._want_visible = False
         self._busy = False
+        self._in_progress = False
         self._folder = ""
         self._clip_started = 0.0
         self._ctx = SessionContext()
@@ -99,11 +101,13 @@ class BugReportWindow(SCWindow):
         self._pages.addWidget(self._build_search_page())
         self._more = MoreInfoForm()
         self._more.submit_requested.connect(self._submit_more)
+        self._more.finish_requested.connect(self._finish)
         self._more.back_requested.connect(self._show_search)
         self._more.changed.connect(self._rewrite_report)
         self._pages.addWidget(self._more)
         self._new = NewIssueForm()
         self._new.submit_requested.connect(self._submit_new)
+        self._new.finish_requested.connect(self._finish)
         self._new.back_requested.connect(self._show_search)
         self._new.changed.connect(self._rewrite_report)
         self._pages.addWidget(self._new)
@@ -198,6 +202,9 @@ class BugReportWindow(SCWindow):
         self._new_issue = QPushButton("Report a new issue")
         self._new_issue.clicked.connect(self._report_new)
         actions.addWidget(self._new_issue)
+        self._finish_search = QPushButton("Finish and Save")
+        self._finish_search.clicked.connect(self._finish)
+        actions.addWidget(self._finish_search)
         actions.addStretch(1)
         lay.addLayout(actions)
         clip_row = QHBoxLayout()
@@ -222,11 +229,26 @@ class BugReportWindow(SCWindow):
 
     # ── activation ───────────────────────────────────────────────────────────
 
+    def show_or_resume(self) -> None:
+        """Show the window. An unfinished issue comes back on the page it was on."""
+        self._want_visible = True
+        if self._busy:
+            return
+        if self._in_progress and self._folder and os.path.isdir(self._folder):
+            self._reveal()
+            return
+        if self._apply_progress(load_progress()):
+            self._status.setText("Back to the issue in progress.")
+            self._reveal(focus=True)
+            return
+        self.begin_activation()
+
     def begin_activation(self) -> None:
         """Open the tool on a new issue folder. The clip is a separate step."""
         self._want_visible = True
         if self._busy:
             return
+        self._in_progress = False
         self._hits = []
         self._detail = None
         self._list.clear()
@@ -252,6 +274,8 @@ class BugReportWindow(SCWindow):
             self._folder = ""
             self._status.setText(f"Could not create an issue folder ({exc}).")
         else:
+            self._in_progress = True
+            self._save_in_progress()
             self._status.setText("Capture the clip, then choose an existing issue or report a new one.")
             task = SessionTask(self._folder, self)
             task.context_ready.connect(self._on_context)
@@ -268,6 +292,7 @@ class BugReportWindow(SCWindow):
         """Hide, send Win+Alt+G, then come back. Screenshots after this are kept."""
         if self._busy or not self._folder:
             return
+        self._save_in_progress()
         self._busy = True
         self._want_visible = True
         self.hide()
@@ -283,14 +308,21 @@ class BugReportWindow(SCWindow):
     def handle_ipc_command(self, cmd: dict) -> None:
         kind = cmd.get("type", "")
         if kind == "show":
-            self.begin_activation()
+            self.show_or_resume()
         elif kind == "hide":
+            self._save_in_progress()
             self._want_visible = False
             self.hide()
         elif kind == "quit":
+            self._save_in_progress()
             self._quit()
 
+    def closeEvent(self, event) -> None:
+        self._save_in_progress()
+        super().closeEvent(event)
+
     def _on_close(self) -> None:
+        self._save_in_progress()
         if self._standalone:
             self._quit()
         else:
@@ -582,6 +614,109 @@ class BugReportWindow(SCWindow):
 
     # ── folder, report, debug cvars ──────────────────────────────────────────
 
+    def _reveal(self, *, focus: bool = False) -> None:
+        self._want_visible = True
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if not focus:
+            return
+        current = self._pages.currentWidget()
+        if current is self._new:
+            self._new.focus_first()
+        elif current is self._more:
+            self._more.focus_edit()
+        else:
+            self._description.setFocus()
+
+    def _page_id(self) -> str:
+        current = self._pages.currentWidget()
+        if current is self._new:
+            return "new"
+        if current is self._more:
+            return "more"
+        return "search"
+
+    def _progress_state(self) -> dict:
+        self._capture_draft()
+        detail = self._detail
+        return {
+            "folder": self._folder,
+            "page": self._page_id(),
+            "description": self._description.text(),
+            "labels": self._labels.labels(),
+            "clip_started": self._clip_started,
+            "blurb": self._more.blurb(),
+            "draft": self._draft,
+            "detail": None if detail is None else {
+                "href": detail.href,
+                "bugmirror_key": detail.bugmirror_key,
+                "key": detail.key,
+                "description": detail.description,
+                "council_url": detail.council_url,
+            },
+        }
+
+    def _save_in_progress(self) -> None:
+        """Write the report and the resume file. A finished issue is left as it is."""
+        if not self._in_progress or not self._folder or not os.path.isdir(self._folder):
+            return
+        self._rewrite_report()
+        try:
+            save_progress(self._progress_state())
+        except OSError as exc:
+            log.warning("bug_report: could not save the in-progress issue: %s", exc)
+
+    def _apply_progress(self, saved: dict | None) -> bool:
+        if not saved:
+            return False
+        folder = str(saved.get("folder") or "")
+        if not folder or not os.path.isdir(folder):
+            clear_progress()
+            return False
+        draft = draft_from_dict(saved.get("draft"))
+        draft.description = str(saved.get("description") or draft.description)
+        self._folder = folder
+        self._clip_started = _as_float(saved.get("clip_started"))
+        self._ctx = read_context(folder)
+        self._show_facts()
+        self._draft = draft
+        self._detail = _detail_from(saved.get("detail"))
+        self._suspend_rewrite = True
+        self._description.blockSignals(True)
+        self._description.setText(draft.description)
+        self._description.blockSignals(False)
+        labels = saved.get("labels")
+        self._labels.set_labels(labels if isinstance(labels, list) else [])
+        self._more.clear()
+        self._new.clear()
+        if draft.mode == "contribution":
+            self._more.set_issue(draft.issue_key, str(saved.get("blurb") or ""))
+            self._more.set_note(draft.more_info)
+        elif draft.mode == "new":
+            self._new.restore(draft)
+        page = str(saved.get("page") or "search")
+        if page == "new":
+            self._pages.setCurrentWidget(self._new)
+        elif page == "more":
+            self._pages.setCurrentWidget(self._more)
+        else:
+            self._pages.setCurrentIndex(0)
+        self._suspend_rewrite = False
+        self._in_progress = True
+        return True
+
+    def _finish(self) -> None:
+        """Save the issue and stop bringing it back the next time the window opens."""
+        if self._in_progress and self._folder:
+            self._rewrite_report()
+        self._in_progress = False
+        try:
+            clear_progress()
+        except OSError as exc:
+            log.warning("bug_report: could not finish the issue: %s", exc)
+        self._status.setText("Saved. Opening Bug Report again starts a new issue.")
+
     def _capture_draft(self) -> None:
         self._draft.description = self._description.text()
         if self._draft.mode == "contribution":
@@ -731,6 +866,29 @@ class _MatchDelegate(QStyledItemDelegate):
         width = max(width - 16, 20)
         doc = _document(index.data(Qt.UserRole) or "", P.fg, width, option.font)
         return QSize(int(width) + 16, int(doc.size().height()) + 10)
+
+
+def _as_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _detail_from(data) -> IssueDetail | None:
+    if not isinstance(data, dict):
+        return None
+    url = str(data.get("council_url") or "")
+    key = str(data.get("key") or "")
+    if not url and not key:
+        return None
+    return IssueDetail(
+        href=str(data.get("href") or ""),
+        bugmirror_key=str(data.get("bugmirror_key") or ""),
+        key=key,
+        description=str(data.get("description") or ""),
+        council_url=url,
+    )
 
 
 def _document(body: str, color: str, width: float, font) -> QTextDocument:
