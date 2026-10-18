@@ -95,6 +95,35 @@ def test_screenshots_after_the_clip_are_copied(tmp_path: Path) -> None:
     assert copy_screenshots_since(issue, source, 0, now=now) == []
 
 
+def test_a_chosen_clips_folder_replaces_the_game_bar_defaults(tmp_path: Path) -> None:
+    from core.capture import captures_directories
+
+    chosen = tmp_path / "clips"
+    chosen.mkdir()
+    assert captures_directories(str(chosen)) == [chosen]
+    assert captures_directories(str(tmp_path / "missing")) == []
+
+
+def test_displayinfo_is_enabled_before_the_clip(monkeypatch) -> None:
+    from core.capture import COMMANDS_ON, request_clip
+
+    order: list[str] = []
+    monkeypatch.setattr("core.capture.game_is_foreground", lambda: True)
+    monkeypatch.setattr("core.capture.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("core.capture.list_clips", lambda _dirs: set())
+    monkeypatch.setattr(
+        "core.capture._console_commands",
+        lambda commands, _vk: order.append(commands[0]),
+    )
+    monkeypatch.setattr("core.capture._press_game_bar", lambda: order.append("clip"))
+    result = request_clip(enable_displayinfo=True, console_key="`")
+    assert order == [COMMANDS_ON[0], "clip"]
+    assert result.watch_clip
+    order.clear()
+    request_clip(enable_displayinfo=False)
+    assert order == ["clip"]
+
+
 def test_grave_is_the_console_key_without_sending_it() -> None:
     assert console_vk("`") == 0xC0
     assert console_vk("") == 0xC0

@@ -51,9 +51,15 @@ class ClipTask(_Task):
     ready = Signal(object)
     clip_ready = Signal(object)
 
-    def __init__(self, folder: str, parent=None) -> None:
+    def __init__(
+        self, folder: str, clips_dir: str = "", console_key: str = "`",
+        enable_displayinfo: bool = False, parent=None,
+    ) -> None:
         super().__init__(parent)
         self._folder = folder
+        self._clips_dir = clips_dir
+        self._console_key = console_key
+        self._enable_displayinfo = enable_displayinfo
         self._label = "clip"
 
     def run(self) -> None:
@@ -63,7 +69,11 @@ class ClipTask(_Task):
 
         shown = False
         try:
-            result = request_clip()
+            result = request_clip(
+                clips_dir=self._clips_dir,
+                console_key=self._console_key,
+                enable_displayinfo=self._enable_displayinfo,
+            )
             result.folder = self._folder
             self.ready.emit(result)
             shown = True
@@ -71,9 +81,12 @@ class ClipTask(_Task):
             if result.watch_clip and self._folder:
                 path = copy_new_clip(
                     Path(self._folder), result.clip_before, result.clip_started,
+                    clips_dir=self._clips_dir,
                 ) or ""
             elif result.watch_clip:
-                path = find_new_clip(result.clip_before, result.clip_started) or ""
+                path = find_new_clip(
+                    result.clip_before, result.clip_started, clips_dir=self._clips_dir,
+                ) or ""
             self.clip_ready.emit((self._folder, path))
         except Exception as exc:  # disk, SendInput — reported, never fatal
             log.warning("bug_report: clip failed: %s", exc)
@@ -163,21 +176,5 @@ class LabelCountTask(_Task):
                 total += count
             if found:
                 self.succeeded.emit(self._name, total)
-
-        self._guard(work)
-
-
-class DebugOffTask(_Task):
-    finished_ok = Signal(str)
-
-    def __init__(self, console_key: str, parent=None) -> None:
-        super().__init__(parent)
-        self._console_key = console_key
-        self._label = "debug off"
-
-    def run(self) -> None:
-        def work() -> None:
-            from core.capture import disable_debug
-            self.finished_ok.emit(disable_debug(self._console_key))
 
         self._guard(work)

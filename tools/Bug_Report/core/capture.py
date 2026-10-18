@@ -38,7 +38,6 @@ KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_EXTENDEDKEY = 0x0001
 
 COMMANDS_ON = ("r_displayinfo 3", "r_displaysessioninfo 1")
-COMMANDS_OFF = ("r_displayinfo 0", "r_displaysessioninfo 0")
 
 SC_PROCESS = "StarCitizen.exe"
 
@@ -70,8 +69,15 @@ def make_issue_dir(root: Path | None = None, when: datetime | None = None) -> Pa
     return path
 
 
-def captures_directories() -> list[Path]:
-    """Folders Xbox Game Bar may write a clip into. Missing ones are skipped."""
+def captures_directories(clips_dir: str = "") -> list[Path]:
+    """Folders a new clip may be written into. Missing ones are skipped.
+
+    A chosen clips folder replaces the Xbox Game Bar defaults.
+    """
+    chosen = (clips_dir or "").strip()
+    if chosen:
+        path = Path(chosen)
+        return [path] if path.is_dir() else []
     candidates: list[Path] = []
     videos = _videos_folder()
     if videos is not None:
@@ -165,11 +171,15 @@ def game_is_foreground() -> bool:
     return name is not None and name.lower() == SC_PROCESS.lower()
 
 
-def request_clip(wait_s: float = 2.0) -> CaptureResult:
+def request_clip(
+    wait_s: float = 2.0, *, clips_dir: str = "", console_key: str = "`",
+    enable_displayinfo: bool = False,
+) -> CaptureResult:
     """Send Win+Alt+G once Star Citizen is in front.
 
     ``clip_started`` is the moment the clip was requested. Screenshots taken
-    after that are the ones to keep.
+    after that are the ones to keep. When ``enable_displayinfo`` is set, the
+    debug overlay is turned on before the clip hotkey.
     """
     result = CaptureResult(folder="")
     deadline = time.time() + wait_s
@@ -181,7 +191,15 @@ def request_clip(wait_s: float = 2.0) -> CaptureResult:
         )
         return result
     result.game_was_foreground = True
-    result.clip_before = list_clips(captures_directories())
+    if enable_displayinfo:
+        try:
+            _console_commands(COMMANDS_ON, console_vk(console_key))
+        except OSError as exc:
+            result.notes.append(f"The console commands could not be sent ({exc}).")
+            log.warning("bug_report: displayinfo before clip failed: %s", exc)
+        else:
+            time.sleep(_AFTER_CONSOLE_CLOSE_S)
+    result.clip_before = list_clips(captures_directories(clips_dir))
     result.clip_started = time.time()
     try:
         _press_game_bar()
@@ -323,9 +341,9 @@ def _unused_name(folder: Path, name: str) -> Path:
 
 
 def find_new_clip(before: set[str], started: float,
-                  timeout: float = _CLIP_TIMEOUT_S) -> str | None:
-    """Wait until a new Game Bar video finishes writing. None if none appears."""
-    dirs = captures_directories()
+                  timeout: float = _CLIP_TIMEOUT_S, clips_dir: str = "") -> str | None:
+    """Wait until a new video finishes writing. None if none appears."""
+    dirs = captures_directories(clips_dir)
     if not dirs:
         return None
     deadline = time.time() + timeout
@@ -359,27 +377,12 @@ def adopt_clip(folder: Path, source: str) -> str | None:
 
 
 def copy_new_clip(folder: Path, before: set[str], started: float,
-                  timeout: float = _CLIP_TIMEOUT_S) -> str | None:
-    """Wait for a new Game Bar video and copy it into *folder*. None if none appears."""
-    found = find_new_clip(before, started, timeout)
+                  timeout: float = _CLIP_TIMEOUT_S, clips_dir: str = "") -> str | None:
+    """Wait for a new video and copy it into *folder*. None if none appears."""
+    found = find_new_clip(before, started, timeout, clips_dir)
     if not found:
         return None
     return adopt_clip(folder, found)
-
-
-def disable_debug(console_key: str) -> str:
-    """Send the cvars back to 0, only while the game is in front."""
-    hwnd = _find_game_window()
-    if not hwnd:
-        return "Star Citizen's window was not found, so the debug overlay was left as it is."
-    if not _focus(hwnd) or not game_is_foreground():
-        return "Star Citizen was not in front, so the debug overlay was left as it is."
-    try:
-        _console_commands(COMMANDS_OFF, console_vk(console_key))
-    except OSError as exc:
-        log.warning("bug_report: could not clear debug cvars: %s", exc)
-        return "The console commands to hide the debug overlay could not be sent."
-    return "Debug overlay turned off."
 
 
 # ── windows input ────────────────────────────────────────────────────────────

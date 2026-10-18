@@ -71,6 +71,19 @@ def state_for_open(folder: str | os.PathLike) -> dict[str, Any] | None:
     return state
 
 
+def copy_issue_files(source: str | os.PathLike, dest: str | os.PathLike) -> None:
+    """Copy the saved report and evidence into a new folder. The state file stays behind."""
+    src = Path(source)
+    dst = Path(dest)
+    if not src.is_dir():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if not item.is_file() or item.name == _STATE:
+            continue
+        shutil.copy2(item, dst / item.name)
+
+
 def discard_issue(folder: str | os.PathLike) -> None:
     path = Path(folder)
     if path.is_dir():

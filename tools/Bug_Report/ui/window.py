@@ -6,10 +6,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
     QListWidgetItem, QPushButton, QSplitter, QStackedWidget, QStyle, QStyleOptionViewItem,
     QStyledItemDelegate, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -23,7 +23,7 @@ from core.bugmirror import (
 )
 from core.capture import REPORTS_ROOT, CaptureResult, adopt_clip, copy_screenshots_since, make_issue_dir
 from core.issues import (
-    discard_issue, discard_untitled, set_issue_id, state_for_open, write_issue_state,
+    copy_issue_files, discard_issue, discard_untitled, set_issue_id, state_for_open, write_issue_state,
 )
 from core.progress import clear_progress, draft_from_dict, load_progress, save_progress
 from core.report import (
@@ -34,7 +34,8 @@ from core import settings as st
 from ui.forms import MoreInfoForm, NewIssueForm
 from ui.label_picker import LabelPicker
 from ui.my_issues import MyIssuesPage
-from ui.workers import ClipTask, DebugOffTask, DetailTask, SearchTask, SessionTask
+from ui.settings_dialog import SettingsDialog
+from ui.workers import ClipTask, DetailTask, SearchTask, SessionTask
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class BugReportWindow(SCWindow):
         self._want_visible = False
         self._busy = False
         self._in_progress = False
+        self._saved = False
+        self._form_origin = "search"
         self._folder = ""
         self._loose_clip = ""
         self._clip_started = 0.0
@@ -106,14 +109,20 @@ class BugReportWindow(SCWindow):
         self._pages.addWidget(self._build_search_page())
         self._more = MoreInfoForm()
         self._more.submit_requested.connect(self._submit_more)
-        self._more.finish_requested.connect(self._finish)
-        self._more.back_requested.connect(self._show_search)
+        self._more.council_requested.connect(self._open_council)
+        self._more.save_requested.connect(self._save_entry)
+        self._more.discard_requested.connect(self._discard_entry)
+        self._more.save_as_new_requested.connect(self._save_as_new)
+        self._more.back_requested.connect(self._back_from_form)
         self._more.changed.connect(self._rewrite_report)
         self._pages.addWidget(self._more)
         self._new = NewIssueForm()
         self._new.submit_requested.connect(self._submit_new)
-        self._new.finish_requested.connect(self._finish)
-        self._new.back_requested.connect(self._show_search)
+        self._new.council_requested.connect(self._open_council)
+        self._new.save_requested.connect(self._save_entry)
+        self._new.discard_requested.connect(self._discard_entry)
+        self._new.save_as_new_requested.connect(self._save_as_new)
+        self._new.back_requested.connect(self._back_from_form)
         self._new.changed.connect(self._rewrite_report)
         self._pages.addWidget(self._new)
         self._mine = MyIssuesPage()
@@ -124,42 +133,15 @@ class BugReportWindow(SCWindow):
         self._mine.back_requested.connect(self._show_search)
         self._pages.addWidget(self._mine)
 
-        media = QHBoxLayout()
-        media_label = QLabel("Screenshots")
-        media_label.setStyleSheet(f"color: {P.fg_dim};")
-        media.addWidget(media_label)
-        self._media_dir = QLineEdit(self._settings.get("media_dir", ""))
-        self._media_dir.setPlaceholderText("Folder where screenshots are saved")
-        self._media_dir.setToolTip(
-            "Screenshots saved here after Capture clip are copied in when you choose an issue."
-        )
-        self._media_dir.editingFinished.connect(self._save_media)
-        media.addWidget(self._media_dir, 1)
-        browse = QPushButton("Browse")
-        browse.clicked.connect(self._browse_media)
-        media.addWidget(browse)
-        lay.addLayout(media)
         self._clip_shortcut = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
         self._clip_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._clip_shortcut.activated.connect(self._capture_clip)
 
         actions = QHBoxLayout()
-        self._debug_off = QPushButton("Turn debug info off")
-        self._debug_off.clicked.connect(self._turn_debug_off)
-        actions.addWidget(self._debug_off)
-        self._open_folder = QPushButton("Open folder")
-        self._open_folder.clicked.connect(self._reveal_folder)
-        actions.addWidget(self._open_folder)
+        self._settings_btn = QPushButton("Settings")
+        self._settings_btn.clicked.connect(self._open_settings)
+        actions.addWidget(self._settings_btn)
         actions.addStretch(1)
-        key_label = QLabel("Console key")
-        key_label.setStyleSheet(f"color: {P.fg_dim};")
-        actions.addWidget(key_label)
-        self._console = QLineEdit(self._settings.get("console_key", "`"))
-        self._console.setMaxLength(1)
-        self._console.setFixedWidth(36)
-        self._console.setToolTip("The key that opens the Star Citizen console. Default is `.")
-        self._console.editingFinished.connect(self._save_console_key)
-        actions.addWidget(self._console)
         lay.addLayout(actions)
 
     def _build_search_page(self) -> QWidget:
@@ -193,7 +175,7 @@ class BugReportWindow(SCWindow):
             f"QListWidget::item:selected {{ background: {P.selection}; color: {P.fg_bright}; }}"
         )
         self._list.currentRowChanged.connect(self._row_chosen)
-        matches_pane, self._matches_header = _pane("Matches", self._list)
+        matches_pane, self._matches_header = _pane("", self._list)
         splitter.addWidget(matches_pane)
         self._detail_view = QTextEdit()
         self._detail_view.setReadOnly(True)
@@ -261,13 +243,17 @@ class BugReportWindow(SCWindow):
         if self._busy:
             return
         self._in_progress = False
+        self._saved = False
+        self._form_origin = "search"
         self._folder = ""
         self._loose_clip = ""
+        self._more.set_saved(False)
+        self._new.set_saved(False)
         discard_untitled()
         self._hits = []
         self._detail = None
         self._list.clear()
-        self._matches_header.setText("Matches")
+        self._matches_header.setText("")
         self._detail_view.clear()
         self._confirm.setEnabled(False)
         self._clip_started = 0.0
@@ -304,7 +290,13 @@ class BugReportWindow(SCWindow):
         self._want_visible = True
         self.hide()
         self._status.setText("Saving the last 30 seconds…")
-        task = ClipTask(self._folder, self)
+        task = ClipTask(
+            self._folder,
+            str(self._settings.get("clips_dir") or ""),
+            self._console_key(),
+            bool(self._settings.get("enable_displayinfo")),
+            self,
+        )
         task.ready.connect(self._on_capture_ready)
         task.clip_ready.connect(self._on_clip)
         task.failed.connect(self._on_capture_failed)
@@ -463,14 +455,14 @@ class BugReportWindow(SCWindow):
             self._hits = []
             self._detail = None
             self._list.clear()
-            self._matches_header.setText("Matches")
+            self._matches_header.setText("")
             self._detail_view.clear()
             self._confirm.setEnabled(False)
             self._status.setText("No matching issues on Bugmirror.")
             return
         self._search_btn.setEnabled(False)
         self._list.clear()
-        self._matches_header.setText("Matches")
+        self._matches_header.setText("")
         self._hits = []
         self._detail = None
         self._confirm.setEnabled(False)
@@ -503,11 +495,12 @@ class BugReportWindow(SCWindow):
             item.setToolTip(hit.council_url or hit.href)
             self._list.addItem(item)
         total = result.total if result.total is not None else len(self._hits)
+        if total < 0:
+            total = 0
+        self._matches_header.setText(f"{total:,} Matches")
         if total <= 0:
-            self._matches_header.setText("Matches")
             count = "No matching issues on Bugmirror."
         else:
-            self._matches_header.setText(f"{total:,} issue" + ("s" if total != 1 else ""))
             if len(self._hits) < total:
                 count = f"Showing {len(self._hits):,} of {total:,} issues."
             else:
@@ -557,6 +550,7 @@ class BugReportWindow(SCWindow):
             return
         if not self._ensure_issue_dir():
             return
+        self._form_origin = "search"
         key = self._detail.key or self._detail.bugmirror_key
         if key != self._draft.issue_key:
             self._more.clear()
@@ -572,8 +566,10 @@ class BugReportWindow(SCWindow):
         if len(blurb) > 280:
             blurb = blurb[:277].rstrip() + "…"
         self._more.set_issue(key, blurb)
+        self._more.set_detail(_format_detail(self._detail, []))
         copied = self._collect_screenshots()
         self._pages.setCurrentWidget(self._more)
+        self._more.set_saved(self._saved)
         self._more.focus_edit()
         self._rewrite_report()
         self._status.setText(self._with_screenshots(
@@ -583,11 +579,13 @@ class BugReportWindow(SCWindow):
     def _report_new(self) -> None:
         if not self._ensure_issue_dir():
             return
+        self._form_origin = "search"
         self._draft.mode = "new"
         if not self._new.title().strip():
             self._new.set_title(self._description.text().strip())
         copied = self._collect_screenshots()
         self._pages.setCurrentWidget(self._new)
+        self._new.set_saved(self._saved)
         self._new.focus_first()
         self._rewrite_report()
         self._status.setText(self._with_screenshots(
@@ -598,6 +596,37 @@ class BugReportWindow(SCWindow):
         self._leave()
         self._pages.setCurrentIndex(0)
         self._description.setFocus()
+
+    def _back_from_form(self) -> None:
+        """Search when the issue was started there. My Issues when it was opened from that list."""
+        if self._form_origin == "mine":
+            self._show_mine()
+            return
+        self._show_search()
+
+    def _open_council(self) -> None:
+        """Open Issue Council for an issue that has already been saved."""
+        if not self._saved:
+            return
+        self._capture_draft()
+        if self._draft.mode == "contribution":
+            url = self._detail.council_url if self._detail else ""
+            if not url:
+                self._status.setText("This issue has no Issue Council link.")
+                return
+            self._hand_off(
+                url,
+                self._more.more_info(),
+                "More info is on the clipboard. Paste it into the More info box, "
+                "and attach the screenshot and clip.",
+            )
+            return
+        self._hand_off(
+            NEW_ISSUE_URL,
+            None,
+            "The report is on the clipboard. Each heading matches a box on the form. "
+            "Attach the screenshot and clip from the folder that opened.",
+        )
 
     def _submit_more(self) -> None:
         text = self._more.more_info().strip()
@@ -691,12 +720,20 @@ class BugReportWindow(SCWindow):
             "labels": self._labels.labels(),
             "clip_started": self._clip_started,
             "blurb": self._more.blurb(),
+            "saved": self._saved,
+            "origin": self._form_origin,
             "draft": self._draft,
             "detail": None if detail is None else {
                 "href": detail.href,
                 "bugmirror_key": detail.bugmirror_key,
                 "key": detail.key,
                 "description": detail.description,
+                "reproduction": detail.reproduction,
+                "build": detail.build,
+                "status": detail.status,
+                "priority": detail.priority,
+                "labels": list(detail.labels),
+                "staff_comments": detail.staff_comments,
                 "council_url": detail.council_url,
             },
         }
@@ -748,8 +785,9 @@ class BugReportWindow(SCWindow):
 
     def _ensure_issue_dir(self) -> bool:
         """Create the issue folder the first time Contribute or Report is chosen."""
-        if self._folder and os.path.isdir(self._folder):
+        if self._folder and os.path.isdir(self._folder) and not self._saved:
             return True
+        self._saved = False
         try:
             self._folder = str(make_issue_dir())
         except OSError as exc:
@@ -767,11 +805,13 @@ class BugReportWindow(SCWindow):
 
     def _show_issue_form(self) -> None:
         if self._draft.mode == "contribution":
+            self._more.set_saved(self._saved)
             self._pages.setCurrentWidget(self._more)
             self._more.focus_edit()
             return
         self._draft.mode = "new"
         self._new.restore(self._draft)
+        self._new.set_saved(self._saved)
         self._pages.setCurrentWidget(self._new)
         self._new.focus_first()
 
@@ -801,6 +841,7 @@ class BugReportWindow(SCWindow):
         self._new.clear()
         if draft.mode == "contribution":
             self._more.set_issue(draft.issue_key, str(saved.get("blurb") or ""))
+            self._more.set_detail(_format_detail(self._detail, []) if self._detail else "")
             self._more.set_note(draft.more_info)
         elif draft.mode == "new":
             self._new.restore(draft)
@@ -816,7 +857,57 @@ class BugReportWindow(SCWindow):
             self._pages.setCurrentIndex(0)
         self._suspend_rewrite = False
         self._in_progress = True
+        self._saved = bool(saved.get("saved"))
+        origin = str(saved.get("origin") or "search")
+        self._form_origin = origin if origin in ("search", "mine") else "search"
+        self._more.set_saved(self._saved)
+        self._new.set_saved(self._saved)
         return True
+
+    def _save_entry(self) -> None:
+        """Keep this issue and return to search. A new issue needs a title first."""
+        if self._draft.mode == "new" and not self._new.title().strip():
+            self._new.focus_first()
+            self._status.setText("Add an issue title. Other players search for this.")
+            return
+        self._saved = True
+        self._finish()
+
+    def _discard_entry(self) -> None:
+        """Throw away an issue that has not been saved."""
+        if self._saved:
+            return
+        self._discard_current()
+        self.begin_activation()
+        self._status.setText("Discarded.")
+
+    def _save_as_new(self) -> None:
+        """Write the current form into a new issue folder and leave the saved one as it was."""
+        if self._draft.mode == "new" and not self._new.title().strip():
+            self._new.focus_first()
+            self._status.setText("Add an issue title. Other players search for this.")
+            return
+        source = self._folder
+        try:
+            dest = str(make_issue_dir())
+        except OSError as exc:
+            self._status.setText(f"Could not create an issue folder ({exc}).")
+            return
+        if source and os.path.isdir(source):
+            copy_issue_files(source, dest)
+        self._folder = dest
+        self._saved = True
+        self._in_progress = True
+        self._rewrite_report()
+        try:
+            write_issue_state(dest, self._progress_state())
+        except OSError as exc:
+            log.warning("bug_report: could not save the new entry: %s", exc)
+        self._in_progress = False
+        self._folder = ""
+        clear_progress()
+        self.begin_activation()
+        self._status.setText("Saved as a new entry.")
 
     def _finish(self) -> None:
         """Save a titled issue and return to search. An untitled one is deleted."""
@@ -852,6 +943,11 @@ class BugReportWindow(SCWindow):
         if not self._same_folder(folder):
             self._leave()
         state = state_for_open(folder)
+        if state is not None:
+            state["origin"] = "mine"
+        if state is not None and "saved" not in state:
+            progress = load_progress() or {}
+            state["saved"] = not self._same_path(str(progress.get("folder") or ""), folder)
         if not state or not self._apply_progress(state, clear_missing=False):
             self._status.setText("That issue folder is missing.")
             return
@@ -926,36 +1022,19 @@ class BugReportWindow(SCWindow):
         except OSError as exc:
             log.warning("bug_report: could not open %s: %s", self._folder, exc)
 
-    def _turn_debug_off(self) -> None:
-        self._debug_off.setEnabled(False)
-        self.hide()
-        QTimer.singleShot(250, self._send_debug_off)
-
-    def _send_debug_off(self) -> None:
-        task = DebugOffTask(self._console_key(), self)
-        task.finished_ok.connect(self._debug_off_done)
-        task.failed.connect(self._debug_off_done)
-        task.finished.connect(lambda task=task: self._forget(task))
-        self._tasks.append(task)
-        task.start()
-
-    def _debug_off_done(self, message: str) -> None:
-        self._debug_off.setEnabled(True)
-        self._status.setText(message)
-        if self._want_visible:
-            self.show()
-            self.raise_()
-            self.activateWindow()
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self._settings, self)
+        dialog.exec()
 
     def _console_key(self) -> str:
-        text = self._console.text().strip()
+        text = str(self._settings.get("console_key") or "`").strip()
         return text[:1] if text else "`"
 
     def _collect_screenshots(self) -> int:
         """Copy shots taken after the clip, up to this choice of issue."""
         if not self._folder or self._clip_started <= 0:
             return 0
-        source = self._media_dir.text().strip()
+        source = str(self._settings.get("media_dir") or "").strip()
         if not source:
             return 0
         try:
@@ -970,30 +1049,6 @@ class BugReportWindow(SCWindow):
             return message
         noun = "screenshot" if copied == 1 else "screenshots"
         return f"{message} Copied {copied} {noun}."
-
-    def _browse_media(self) -> None:
-        current = self._media_dir.text().strip()
-        chosen = QFileDialog.getExistingDirectory(self, "Screenshots", current)
-        if not chosen:
-            return
-        self._media_dir.setText(chosen)
-        self._save_media()
-
-    def _save_media(self) -> None:
-        self._settings["media_dir"] = self._media_dir.text().strip()
-        try:
-            st.save_settings(self._settings)
-        except OSError as exc:
-            log.warning("bug_report: could not save the media folder: %s", exc)
-
-    def _save_console_key(self) -> None:
-        self._settings["console_key"] = self._console_key()
-        self._console.setText(self._settings["console_key"])
-        try:
-            st.save_settings(self._settings)
-        except OSError as exc:
-            log.warning("bug_report: could not save the console key: %s", exc)
-
 
 def _pane(title: str, widget: QWidget) -> tuple[QWidget, QLabel]:
     """A labelled card, so the match list and the open issue stay distinct."""
@@ -1066,11 +1121,18 @@ def _detail_from(data) -> IssueDetail | None:
     key = str(data.get("key") or "")
     if not url and not key:
         return None
+    labels = data.get("labels")
     return IssueDetail(
         href=str(data.get("href") or ""),
         bugmirror_key=str(data.get("bugmirror_key") or ""),
         key=key,
         description=str(data.get("description") or ""),
+        reproduction=str(data.get("reproduction") or ""),
+        build=str(data.get("build") or ""),
+        status=str(data.get("status") or ""),
+        priority=str(data.get("priority") or ""),
+        labels=[str(item) for item in labels] if isinstance(labels, list) else [],
+        staff_comments=str(data.get("staff_comments") or ""),
         council_url=url,
     )
 

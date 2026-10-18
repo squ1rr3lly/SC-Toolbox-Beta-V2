@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QEvent, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from shared.qt.theme import P
@@ -223,7 +223,10 @@ class MoreInfoForm(QWidget):
     """The More info box on an existing Issue Council report."""
 
     submit_requested = Signal()
-    finish_requested = Signal()
+    save_requested = Signal()
+    discard_requested = Signal()
+    save_as_new_requested = Signal()
+    council_requested = Signal()
     back_requested = Signal()
     changed = Signal()
 
@@ -232,10 +235,17 @@ class MoreInfoForm(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
+        self._detail = QTextEdit()
+        self._detail.setReadOnly(True)
+        self._detail.setMinimumHeight(140)
+        self._detail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._detail.setStyleSheet(
+            f"QTextEdit {{ background: {P.bg_primary}; color: {P.fg}; border: none; padding: 8px; }}"
+        )
+        lay.addWidget(self._detail, 1)
         self._heading = _heading("More info")
         lay.addWidget(self._heading)
-        self._blurb = _dim("")
-        lay.addWidget(self._blurb)
+        self._blurb_text = ""
         self._edit = _plain(
             "Different steps, how often it happens, or a workaround.",
             lines=None,
@@ -244,14 +254,20 @@ class MoreInfoForm(QWidget):
         self._edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._edit.textChanged.connect(self.changed.emit)
         lay.addWidget(self._edit, 1)
-        lay.addWidget(_dim("This is pasted into the More info box. Ctrl+Enter saves and opens the issue."))
-        lay.addLayout(self._buttons("Save and open issue"))
-        _submit_shortcut(self, self.submit_requested.emit)
+        lay.addWidget(_dim("Ctrl+Enter opens Issue Council after this issue is saved."))
+        lay.addLayout(self._buttons())
+        _submit_shortcut(self, self._council_clicked)
 
     def set_issue(self, key: str, blurb: str) -> None:
         self._heading.setText(f"More info  ·  {key}" if key else "More info")
-        self._blurb.setText(blurb)
-        self._blurb.setVisible(bool(blurb))
+        self._blurb_text = blurb
+
+    def set_detail(self, html: str) -> None:
+        """The Bugmirror issue, shown above the More info box."""
+        self._detail.setHtml(html)
+
+    def detail_text(self) -> str:
+        return self._detail.toPlainText()
 
     def more_info(self) -> str:
         return self._edit.toPlainText()
@@ -260,40 +276,67 @@ class MoreInfoForm(QWidget):
         self._edit.setPlainText(text)
 
     def blurb(self) -> str:
-        return self._blurb.text()
+        return self._blurb_text
 
     def clear(self) -> None:
         self._edit.clear()
+        self._detail.clear()
         self.set_issue("", "")
 
     def focus_edit(self) -> None:
         self._edit.setFocus()
 
-    def _buttons(self, save_label: str) -> QHBoxLayout:
+    def _buttons(self) -> QHBoxLayout:
         row = QHBoxLayout()
         back = QPushButton("Back")
         back.clicked.connect(self.back_requested.emit)
-        save = QPushButton(save_label)
-        save.clicked.connect(self.submit_requested.emit)
-        finish = QPushButton("Finish and Save")
-        finish.clicked.connect(self.finish_requested.emit)
+        self._save_action = QPushButton("Save")
+        self._save_action.clicked.connect(self.save_requested.emit)
+        self._other_action = QPushButton("Discard")
+        self._other_action.clicked.connect(self._other_clicked)
+        self._council = QPushButton("Open Issue Council")
+        self._council.setEnabled(False)
+        self._council.clicked.connect(self._council_clicked)
+        self._entry_saved = False
         row.addWidget(back)
-        row.addWidget(save)
-        row.addWidget(finish)
+        row.addWidget(self._save_action)
+        row.addWidget(self._other_action)
         row.addStretch(1)
+        row.addWidget(self._council)
         return row
+
+    def set_saved(self, saved: bool) -> None:
+        """Saved entries update in place or fork. A new one is saved or discarded."""
+        self._entry_saved = saved
+        self._save_action.setText("Save Changes" if saved else "Save")
+        self._other_action.setText("Save as New Entry" if saved else "Discard")
+        self._council.setEnabled(saved)
+
+    def _council_clicked(self) -> None:
+        if self._council.isEnabled():
+            self.council_requested.emit()
+
+    def _other_clicked(self) -> None:
+        if self._entry_saved:
+            self.save_as_new_requested.emit()
+        else:
+            self.discard_requested.emit()
 
 
 class NewIssueForm(QWidget):
     """The new-issue fields, in the order Issue Council asks for them."""
 
     submit_requested = Signal()
-    finish_requested = Signal()
+    save_requested = Signal()
+    discard_requested = Signal()
+    save_as_new_requested = Signal()
+    council_requested = Signal()
     back_requested = Signal()
     changed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._entry_saved = False
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
@@ -369,9 +412,9 @@ class NewIssueForm(QWidget):
 
         scroll.setWidget(inner)
         root.addWidget(scroll, 1)
-        root.addWidget(_dim("Ctrl+Enter saves the report and opens the new-issue page."))
+        root.addWidget(_dim("Ctrl+Enter opens Issue Council after this issue is saved."))
         root.addLayout(self._button_row())
-        _submit_shortcut(self, self.submit_requested.emit)
+        _submit_shortcut(self, self._council_clicked)
 
     def issue_id(self) -> str:
         return self._issue_id.text()
@@ -469,12 +512,33 @@ class NewIssueForm(QWidget):
         row = QHBoxLayout()
         back = QPushButton("Back")
         back.clicked.connect(self.back_requested.emit)
-        save = QPushButton("Save and open issue")
-        save.clicked.connect(self.submit_requested.emit)
-        finish = QPushButton("Finish and Save")
-        finish.clicked.connect(self.finish_requested.emit)
+        self._save_action = QPushButton("Save")
+        self._save_action.clicked.connect(self.save_requested.emit)
+        self._other_action = QPushButton("Discard")
+        self._other_action.clicked.connect(self._other_clicked)
+        self._council = QPushButton("Open Issue Council")
+        self._council.setEnabled(False)
+        self._council.clicked.connect(self._council_clicked)
         row.addWidget(back)
-        row.addWidget(save)
-        row.addWidget(finish)
+        row.addWidget(self._save_action)
+        row.addWidget(self._other_action)
         row.addStretch(1)
+        row.addWidget(self._council)
         return row
+
+    def set_saved(self, saved: bool) -> None:
+        """Saved entries update in place or fork. A new one is saved or discarded."""
+        self._entry_saved = saved
+        self._save_action.setText("Save Changes" if saved else "Save")
+        self._other_action.setText("Save as New Entry" if saved else "Discard")
+        self._council.setEnabled(saved)
+
+    def _council_clicked(self) -> None:
+        if self._council.isEnabled():
+            self.council_requested.emit()
+
+    def _other_clicked(self) -> None:
+        if self._entry_saved:
+            self.save_as_new_requested.emit()
+        else:
+            self.discard_requested.emit()

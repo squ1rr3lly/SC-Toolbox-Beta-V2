@@ -90,12 +90,49 @@ def test_choosing_an_issue_copies_screenshots_taken_after_the_clip(qapp, tmp_pat
     os.utime(early, (now, now - 120))
     window = _window(qapp)
     window._folder = str(issue)
-    window._media_dir.setText(str(shots))
+    window._settings["media_dir"] = str(shots)
     window._clip_started = now - 30
     window._report_new()
     assert (issue / "bug.jpg").is_file()
     assert not (issue / "earlier.png").exists()
     assert "Copied 1 screenshot." in window._status.text()
+    window.close()
+
+
+def test_settings_hold_the_folders_console_key_and_issues_folder(qapp, tmp_path, monkeypatch) -> None:
+    saved: list[dict] = []
+    monkeypatch.setattr("ui.settings_dialog.st.save_settings", lambda data: saved.append(dict(data)))
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "ui.settings_dialog.os.startfile", lambda path: opened.append(str(path)), raising=False,
+    )
+    window = _window(qapp)
+    labels = [widget.text() for widget in window.findChildren(QLabel)]
+    buttons = [widget.text() for widget in window.findChildren(QPushButton)]
+    assert "Screenshots" not in labels
+    assert "Console key" not in labels
+    assert "Open folder" not in buttons
+    assert "Turn debug info off" not in buttons
+    assert "Settings" in buttons
+
+    from ui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(window._settings, window)
+    dialog._shots.setText(str(tmp_path / "shots"))
+    dialog._clips.setText(str(tmp_path / "clips"))
+    dialog._console.setText("~")
+    dialog._displayinfo.setChecked(True)
+    dialog.apply()
+    assert window._settings["media_dir"] == str(tmp_path / "shots")
+    assert window._settings["clips_dir"] == str(tmp_path / "clips")
+    assert window._settings["console_key"] == "~"
+    assert window._settings["enable_displayinfo"] is True
+    assert saved
+    names = [widget.text() for widget in dialog.findChildren(QPushButton)]
+    assert "Open saved issues directory" in names
+    dialog._open_issues()
+    assert opened
+    dialog.close()
     window.close()
 
 
@@ -114,6 +151,7 @@ def test_existing_issue_asks_for_more_info_and_saves_it(qapp, tmp_path, monkeypa
     window._confirm_issue()
     assert window._pages.currentWidget() is window._more
     assert "STARC-222067" in window._more._heading.text()
+    assert "Cannot bed log on the Constellation." in window._more.detail_text()
 
     window._submit_more()
     assert opened == []
@@ -191,8 +229,12 @@ def test_results_show_the_total_and_highlight_matched_text(qapp) -> None:
         labels=["BedLogging"],
         matched=["bed", "BedLogging"],
     )
+    assert window._matches_header.text() == ""
     window._on_search(SearchResult(hits=[hit], total=4))
-    assert window._matches_header.text() == "4 issues"
+    assert window._matches_header.text() == "4 Matches"
+    window._on_search(SearchResult(hits=[], total=0))
+    assert window._matches_header.text() == "0 Matches"
+    window._on_search(SearchResult(hits=[hit], total=4))
     assert "Showing 1 of 4 issues." in window._status.text()
     html = window._list.item(0).data(Qt.UserRole)
     assert '<span class="hit">Bed</span>' in html
@@ -289,6 +331,7 @@ def test_closing_from_the_title_bar_saves_the_more_info_note(qapp, tmp_path, mon
     again.show_or_resume()
     assert again._pages.currentWidget() is again._more
     assert again._more.more_info() == "Happens every time."
+    assert "Cannot bed log." in again._more.detail_text()
     assert again._detail is not None
     assert again._detail.council_url == "https://issue-council.example/STARC-222067"
     again.close()
@@ -409,4 +452,76 @@ def test_an_issue_folder_is_created_only_from_report_or_contribute(qapp, tmp_pat
     assert not (reports / "20261018-120000").exists()
     assert window._pages.currentIndex() == 0
     assert window._status.text() == "Untitled issue discarded."
+    window.close()
+
+
+def _form_buttons(form) -> list[str]:
+    return [button.text() for button in form.findChildren(QPushButton)]
+
+
+def test_a_new_issue_is_saved_or_discarded_and_a_saved_one_can_fork(qapp, tmp_path, monkeypatch) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    monkeypatch.setattr("core.issues.REPORTS_ROOT", reports)
+    monkeypatch.setattr("core.capture.REPORTS_ROOT", reports)
+
+    class _Session(QObject):
+        context_ready = Signal(object)
+        failed = Signal(str)
+        finished = Signal()
+
+        def __init__(self, folder, parent=None) -> None:
+            super().__init__(parent)
+
+        def start(self) -> None:
+            self.finished.emit()
+
+    numbers = {"n": 0}
+
+    def _make():
+        numbers["n"] += 1
+        path = reports / f"20261018-12000{numbers['n']}"
+        path.mkdir()
+        return path
+
+    monkeypatch.setattr("ui.window.SessionTask", _Session)
+    monkeypatch.setattr("ui.window.make_issue_dir", _make)
+    window = _window(qapp)
+    window._description.setText("bed log")
+    window._report_new()
+    assert "Save" in _form_buttons(window._new)
+    assert "Discard" in _form_buttons(window._new)
+    assert "Save Changes" not in _form_buttons(window._new)
+    assert "Save and open issue" not in _form_buttons(window._new)
+    council = next(button for button in window._new.findChildren(QPushButton) if button.text() == "Open Issue Council")
+    assert not council.isEnabled()
+    first = window._folder
+    window._new._happened.setPlainText("The ship was gone.")
+    window._save_entry()
+    assert window._pages.currentIndex() == 0
+    assert read_issue_state(first)["saved"] is True
+
+    window._show_mine()
+    opener = next(button for button in window._mine.findChildren(QPushButton) if button.text() == "bed log")
+    opener.click()
+    assert window._pages.currentWidget() is window._new
+    assert "Save Changes" in _form_buttons(window._new)
+    assert "Save as New Entry" in _form_buttons(window._new)
+    council = next(button for button in window._new.findChildren(QPushButton) if button.text() == "Open Issue Council")
+    assert council.isEnabled()
+    next(button for button in window._new.findChildren(QPushButton) if button.text() == "Back").click()
+    assert window._pages.currentWidget() is window._mine
+    opener = next(button for button in window._mine.findChildren(QPushButton) if button.text() == "bed log")
+    opener.click()
+    window._new.set_title("bed log copy")
+    window._save_as_new()
+    assert os.path.isdir(first)
+    assert read_issue_state(first)["draft"]["title"] == "bed log"
+    copies = [
+        path for path in reports.iterdir()
+        if path.is_dir() and os.path.normcase(str(path)) != os.path.normcase(first)
+    ]
+    assert len(copies) == 1
+    assert read_issue_state(copies[0])["draft"]["title"] == "bed log copy"
+    assert read_issue_state(copies[0])["saved"] is True
     window.close()

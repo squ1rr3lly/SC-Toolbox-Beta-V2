@@ -17,10 +17,20 @@ _DEFAULTS: dict[str, Any] = {
     "console_key": "`",
     # Kept so an older settings file still loads. The workbook is downloaded.
     "labels_workbook": "",
-    # Screenshots and videos copied into a new issue folder.
+    # Screenshots copied into an issue folder after Capture clip.
     "media_dir": "",
+    # Video clips. Empty keeps the Xbox Game Bar Captures folders.
+    "clips_dir": "",
+    # Turn on r_displayinfo before Win+Alt+G.
+    "enable_displayinfo": False,
     "media_minutes": 20,
 }
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def clamp_media_minutes(value: Any) -> int:
@@ -49,6 +59,8 @@ def load_settings() -> dict[str, Any]:
         log.warning("bug_report: settings unreadable (%s); using defaults", exc)
     data["console_key"] = str(data.get("console_key") or "`")[:1] or "`"
     data["media_dir"] = str(data.get("media_dir") or "").strip()
+    data["clips_dir"] = str(data.get("clips_dir") or "").strip()
+    data["enable_displayinfo"] = _as_bool(data.get("enable_displayinfo"))
     data["media_minutes"] = clamp_media_minutes(data.get("media_minutes", 20))
     return data
 
@@ -59,6 +71,8 @@ def save_settings(data: dict[str, Any]) -> None:
     out.update(data)
     out["console_key"] = str(out.get("console_key") or "`")[:1] or "`"
     out["media_dir"] = str(out.get("media_dir") or "").strip()
+    out["clips_dir"] = str(out.get("clips_dir") or "").strip()
+    out["enable_displayinfo"] = _as_bool(out.get("enable_displayinfo"))
     out["media_minutes"] = clamp_media_minutes(out.get("media_minutes", 20))
     tmp = _PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
