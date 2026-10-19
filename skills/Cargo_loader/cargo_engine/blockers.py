@@ -2,7 +2,8 @@
 Minimum 1 SCU cells that stop Auto from placing containers above a size.
 
 Auto places a container only when some whole orientation of it is free
-(see packing._valid_rotations). One occupied cell inside every such
+(see packing._valid_rotations). The long side stays horizontal: a 16, 24,
+or 32 SCU box never stands on its end. One occupied cell inside every such
 placement makes that size impossible. Every larger container in the schema
 contains a placement of the next size down, so it is enough to block the
 smallest size Auto could still use above the cap. The tests check that

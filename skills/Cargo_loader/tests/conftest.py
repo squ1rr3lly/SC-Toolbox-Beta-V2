@@ -17,6 +17,23 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _size_cap_off():
+    """The size cap defaults off, and a test that turns it on cannot leak."""
+    import os
+    import sys
+    skill = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+    root = os.path.normpath(os.path.join(skill, "..", ".."))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import shared.path_setup
+    shared.path_setup.ensure_path(skill)
+    from cargo_engine.packing import set_long_side_only
+    set_long_side_only(False)
+    yield
+    set_long_side_only(False)
+
+
+@pytest.fixture(autouse=True)
 def _no_unanswered_dialogs(monkeypatch):
     # The test modules import cargo_app themselves (after their own sys.path
     # setup), so by the time a test runs it is already in sys.modules. Never

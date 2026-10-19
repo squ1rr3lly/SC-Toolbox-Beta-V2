@@ -6,6 +6,7 @@ Pure functions, no state, no UI dependencies.
 
 import itertools
 
+from cargo_engine.packing import lies_on_long_side
 from cargo_engine.schema import CONTAINER_DIMS, CONTAINER_MAX_STACK_HEIGHT
 
 
@@ -28,6 +29,8 @@ def best_rotation(
             continue
         seen.add(perm)
         cw, ch, cl = perm
+        if not lies_on_long_side(cw, ch, cl):
+            continue
         if max_ch is not None and ch > max_ch:
             continue
         if cw <= sw and ch <= sh and cl <= sl:
@@ -49,6 +52,8 @@ def max_containers_in_slot(size: int, w: int, h: int, l: int) -> int:
             continue
         seen.add(perm)
         cd_x, cd_y, cd_z = perm
+        if not lies_on_long_side(cd_x, cd_y, cd_z):
+            continue
         if max_ch is not None and cd_y > max_ch:
             continue
         if cd_x <= w and cd_y <= h and cd_z <= l:

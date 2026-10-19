@@ -9,6 +9,28 @@ import math
 
 from cargo_engine.schema import CONTAINER_DIMS, CONTAINER_MAX_STACK_HEIGHT
 
+# Off unless `max_container_size` config flag is on. While off, every container
+# orientation is allowed for 16, 24, and 32 SCU containers.
+_long_side_only = False
+
+
+def set_long_side_only(enabled: bool) -> None:
+    """Require a container's longest edge to stay horizontal."""
+    global _long_side_only
+    _long_side_only = bool(enabled)
+
+
+def lies_on_long_side(cw: int, ch: int, cl: int) -> bool:
+    """The longest edge is horizontal, so the box is not standing on its end.
+
+    A 16 SCU box is 2×2×4. Stood up it covers four floor cells; lying down
+    the 4 runs along X or Z. A cube has no end, so every orientation passes.
+    When the `max_container_size` config flag is off, every orientation is accepted.
+    """
+    if not _long_side_only:
+        return True
+    return max(cw, cl) == max(cw, ch, cl)
+
 
 def _valid_rotations(
     dims: tuple[int, int, int],
@@ -17,6 +39,9 @@ def _valid_rotations(
 ) -> list[tuple[int, int, int]]:
     """All unique orientations of *dims* that fit in sw×sh×sl, sorted by
     (ascending ch, descending footprint area) so low-profile rotations come first.
+
+    Standing a box on its end is not a valid placement when the `max_container_size` 
+    config flag is on.
     """
     seen: set[tuple] = set()
     result = []
@@ -25,6 +50,8 @@ def _valid_rotations(
             continue
         seen.add(perm)
         cw, ch, cl = perm
+        if not lies_on_long_side(cw, ch, cl):
+            continue
         if max_ch is not None and ch > max_ch:
             continue
         if cw <= sw and ch <= sh and cl <= sl:

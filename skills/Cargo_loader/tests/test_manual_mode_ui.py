@@ -37,6 +37,7 @@ def win(monkeypatch):
     monkeypatch.setattr(cargo_app, "_fetch_uex_commodities", lambda: None)
     monkeypatch.setattr(cargo_app.ShipDataLoader, "load_async", lambda self, cb: None)
     monkeypatch.setattr(bw, "_save_window_state", lambda w: None)
+    monkeypatch.setattr(cargo_app, "max_container_size_enabled", lambda: True)
     w = cargo_app.CargoApp(0, 0, 1000, 700, 1.0, None)
     w._commodity_poll.stop()
     monkeypatch.setattr(w._data, "find", lambda name: dict(SHIP))

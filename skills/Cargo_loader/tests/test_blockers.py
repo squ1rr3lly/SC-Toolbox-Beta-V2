@@ -10,8 +10,15 @@ shared.path_setup.ensure_path(os.path.dirname(os.path.dirname(os.path.abspath(__
 import pytest  # noqa: E402
 
 from cargo_engine.blockers import blocker_cells  # noqa: E402
-from cargo_engine.packing import fill_slot_around, place_containers_3d  # noqa: E402
+from cargo_engine.packing import fill_slot_around, place_containers_3d, set_long_side_only  # noqa: E402
 from cargo_engine.schema import CONTAINER_SIZES  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _size_cap_on():
+    """These tests describe the size cap, so the flat-container rule is on."""
+    set_long_side_only(True)
+    yield
 
 
 def _slot(w, h, l, slot_max=None):
@@ -81,7 +88,7 @@ class TestClosedForms:
         assert len(blocker_cells(8, 4, 25, 1)) == 400   # checkerboard, half the cells
         assert len(blocker_cells(8, 4, 25, 2)) == 192   # flat 4 SCU lattice
         assert len(blocker_cells(8, 4, 25, 4)) == 144   # 2x2x2, columns of height 3
-        assert len(blocker_cells(8, 4, 25, 8)) == 96    # 16 SCU, columns filled under the cover
+        assert len(blocker_cells(8, 4, 25, 8)) == 72    # 16 SCU lies flat, so the column stops at y=2
         assert len(blocker_cells(8, 4, 25, 16)) == 48   # 24 SCU
         assert len(blocker_cells(8, 4, 25, 24)) == 36   # 32 SCU
 

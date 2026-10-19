@@ -59,6 +59,7 @@ from cargo_engine.placement import best_rotation, max_containers_in_slot
 from cargo_engine.blockers import blocker_cells
 from cargo_engine.packing import (
     place_containers_3d, build_slots, slot_blocked_cells, fill_slot_around,
+    set_long_side_only,
 )
 from cargo_engine.optimizer import greedy_optimize_3d, assign_slots_from_counts
 from cargo_engine.rendering import (
@@ -106,6 +107,9 @@ CACHE_TTL  = CACHE_TTL_CARGO
 # every ship the game files lack (concepts), so no ship disappears. "sc_cargo_space" uses
 # the old sc-cargo.space scrape cached in .cargo_cache.json. Choose with:
 #   {"grid_source": "sc_cargo_space"}   in cargo_loader_config.json
+#
+# The max container size feature and the associated global change to enforce long containers 
+# lying on their attachment sides is enabled by {"max_container_size": true}.
 CONFIG_FILE      = os.path.join(_DIR, "cargo_loader_config.json")
 SCUNPACKED_FILE  = os.path.join(_DIR, "datamine", "cargo_grids_scunpacked.json")
 
@@ -121,6 +125,12 @@ def load_loader_config() -> dict:
 def grid_source() -> str:
     src = load_loader_config().get("grid_source", "scunpacked")
     return src if src in ("sc_cargo_space", "scunpacked") else "scunpacked"
+
+
+def max_container_size_enabled() -> bool:
+    """The size-cap dropdown and the flat-container rule. Off unless
+    cargo_loader_config.json says {"max_container_size": true}."""
+    return bool(load_loader_config().get("max_container_size", False))
 
 HEADERS = SC_CARGO_HEADERS
 
@@ -1702,6 +1712,13 @@ def _tutorial_hotkey() -> str:
         return "Shift+2"
 
 
+# The size-cap bullet. Dropped from the live tutorial while the feature is off.
+_CAP_BULLET = re.compile(
+    r"\s*<li><b>Max container size</b>.*?</li>",
+    re.DOTALL,
+)
+
+
 class _CargoTutorialDialog(QDialog):
     """Tabbed tutorial bubble for the Cargo Loader tool.
 
@@ -1712,8 +1729,13 @@ class _CargoTutorialDialog(QDialog):
     def tutorial_pages(cls) -> list:
         """(tab label, html) per tab, as shown."""
         hotkey = _tutorial_hotkey()
-        return [(label, content.strip().replace("{HOTKEY}", hotkey))
-                for label, content in zip(cls._TABS, cls._CONTENT)]
+        pages = []
+        for label, content in zip(cls._TABS, cls._CONTENT):
+            html = content.strip().replace("{HOTKEY}", hotkey)
+            if label == "Containers" and not max_container_size_enabled():
+                html = _CAP_BULLET.sub("", html)
+            pages.append((label, html))
+        return pages
 
     # Plain labels, no emoji: an emoji falls back to a font whose advance is
     # ~4x the Consolas glyph, and the tab bar then wants 1104px for six tabs
@@ -2214,6 +2236,7 @@ class CargoApp(SCWindow):
         # _blocker_cells are the 1 SCU boxes holding that cap; they stay put.
         self._cap_size: int | None = None
         self._blocker_cells: set[tuple] = set()
+        set_long_side_only(max_container_size_enabled())
 
         self._build_ui()
         for d in crate_items.crate_defs():
@@ -2690,34 +2713,36 @@ class CargoApp(SCWindow):
         pad_lay.addWidget(self._mode_hint)
         pad_lay.addSpacing(4)
 
-        # Largest box the grid should accept. The 1 SCU marks are drawn below.
-        cap_lbl = QLabel(_("Max container size"), pad)
-        cap_lbl.setStyleSheet(
-            f"color: {FG_DIM}; font-family: Consolas; font-size: 8pt; background: transparent;"
-        )
-        pad_lay.addWidget(cap_lbl)
-        self._cap_combo = QComboBox(pad)
-        self._cap_combo.addItem(_("Off"), None)
-        for size in CONTAINER_SIZES:
-            self._cap_combo.addItem(f"{size} SCU", size)
-        self._cap_combo.setCursor(Qt.PointingHandCursor)
-        self._cap_combo.setToolTip(
-            _("Mark the 1 SCU boxes that stop a larger container fitting"))
-        self._cap_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {BG3}; color: {FG};
-                font-family: Consolas; font-size: 9pt;
-                border: 1px solid {BORDER}; padding: 3px 6px;
-            }}
-            QComboBox:hover {{ border-color: {ACCENT}; }}
-            QComboBox QAbstractItemView {{
-                background-color: {BG3}; color: {FG};
-                selection-background-color: {ACCENT}; selection-color: {BG};
-            }}
-        """)
-        self._cap_combo.currentIndexChanged.connect(self._on_cap_changed)
-        pad_lay.addWidget(self._cap_combo)
-        pad_lay.addSpacing(4)
+        # Largest box the grid should accept. Hidden unless the `max_container_size` config flag is on.
+        self._cap_combo = None
+        if max_container_size_enabled():
+            cap_lbl = QLabel(_("Max container size"), pad)
+            cap_lbl.setStyleSheet(
+                f"color: {FG_DIM}; font-family: Consolas; font-size: 8pt; background: transparent;"
+            )
+            pad_lay.addWidget(cap_lbl)
+            self._cap_combo = QComboBox(pad)
+            self._cap_combo.addItem(_("Off"), None)
+            for size in CONTAINER_SIZES:
+                self._cap_combo.addItem(f"{size} SCU", size)
+            self._cap_combo.setCursor(Qt.PointingHandCursor)
+            self._cap_combo.setToolTip(
+                _("Mark the 1 SCU boxes that stop a larger container fitting"))
+            self._cap_combo.setStyleSheet(f"""
+                QComboBox {{
+                    background-color: {BG3}; color: {FG};
+                    font-family: Consolas; font-size: 9pt;
+                    border: 1px solid {BORDER}; padding: 3px 6px;
+                }}
+                QComboBox:hover {{ border-color: {ACCENT}; }}
+                QComboBox QAbstractItemView {{
+                    background-color: {BG3}; color: {FG};
+                    selection-background-color: {ACCENT}; selection-color: {BG};
+                }}
+            """)
+            self._cap_combo.currentIndexChanged.connect(self._on_cap_changed)
+            pad_lay.addWidget(self._cap_combo)
+            pad_lay.addSpacing(4)
 
         # Container rows
         self._spinboxes: dict[int, QSpinBox] = {}
@@ -4296,6 +4321,8 @@ class CargoApp(SCWindow):
     def _sync_cap_combo(self) -> None:
         """Show `_cap_size` on the dropdown without applying it again."""
         combo = self._cap_combo
+        if combo is None:
+            return
         combo.blockSignals(True)
         for i in range(combo.count()):
             if combo.itemData(i) == self._cap_size:

@@ -23,6 +23,15 @@ class TestBestRotation:
         cw, ch, cl = result
         assert cw <= 2 and ch <= 1 and cl <= 1
 
+    def test_a_long_box_lies_on_its_side(self):
+        """16, 24 and 32 SCU never stand on the 2×2 end."""
+        from cargo_engine.packing import _valid_rotations, set_long_side_only
+        set_long_side_only(True)
+        for size, long in ((16, 4), (24, 6), (32, 8)):
+            rots = _valid_rotations(CONTAINER_DIMS[size], 8, 8, 8, max_ch=None)
+            assert set(rots) == {(long, 2, 2), (2, 2, long)}
+            assert all(ch == 2 for _, ch, _ in rots)
+
     def test_4scu_respects_max_height(self):
         """4 SCU boxes are flat (h=1) and cannot stand on their end."""
         dims = CONTAINER_DIMS[4]  # (2, 1, 2)
