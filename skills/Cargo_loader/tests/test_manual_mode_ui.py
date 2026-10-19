@@ -16,7 +16,7 @@ import pytest  # noqa: E402
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtCore import Qt, QPoint, QPointF, QEvent  # noqa: E402
-from PySide6.QtGui import QMouseEvent  # noqa: E402
+from PySide6.QtGui import QColor, QMouseEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 SHIP = {
@@ -180,24 +180,59 @@ def test_clear_turns_the_cap_off(win):
     assert not win._renderer._manual_boxes
 
 
-def test_cap_asks_before_replacing_hand_boxes(win, monkeypatch):
-    win._renderer._manual_boxes = [(0, 0, 0, 1, 1, 1, 1)]
-    win._sync_counts_from_boxes()
-    monkeypatch.setattr(win, "_ask_reorganise", lambda text: False)
-    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
-    assert win._cap_size is None
-    assert win._renderer._manual_boxes == [(0, 0, 0, 1, 1, 1, 1)]
-
-
-def test_an_item_cell_is_not_marked_again(win, monkeypatch):
+def test_cap_keeps_boxes_already_on_the_grid(win):
     from cargo_engine.blockers import blocker_cells
-    monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
+    hand = (0, 0, 0, 2, 1, 2, 4)
+    win._renderer._manual_boxes = [hand]
+    win._sync_counts_from_boxes()
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    taken = {(0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1)}
+    expected = set(blocker_cells(6, 2, 8, 8, slot_max=32, occupied=taken))
+    drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
+    assert hand in win._renderer._manual_boxes
+    assert drawn == {(0, 0, 0)} | expected
+    assert win._blocker_cells == expected
+    assert taken.isdisjoint(win._blocker_cells)
+
+
+def test_changing_the_cap_replaces_only_the_blocker_boxes(win):
+    from cargo_engine.blockers import blocker_cells
+    hand = (0, 0, 0, 1, 1, 1, 1)
+    win._renderer._manual_boxes = [hand]
+    win._sync_counts_from_boxes()
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(4))
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    expected = set(blocker_cells(6, 2, 8, 8, slot_max=32, occupied={(0, 0, 0)}))
+    drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
+    assert hand in [tuple(b) for b in win._renderer._manual_boxes]
+    assert drawn == {(0, 0, 0)} | expected
+    assert win._blocker_cells == expected
+
+
+def test_blocker_boxes_are_grey_and_other_boxes_keep_their_colour(win):
+    import cargo_app
+    hand = (0, 0, 0, 2, 1, 2, 4)
+    win._renderer._manual_boxes = [hand]
+    win._sync_counts_from_boxes()
+    win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
+    grey = QColor(cargo_app.BLOCKER_COLOR).name()
+    own = QColor(cargo_app.CONT_COL[4]).name()
+    by_pos = {
+        g.box_data[:3]: g._face_items[2].brush().color().name()
+        for g in win._renderer._box_groups
+    }
+    assert by_pos[(0, 0, 0)] == own
+    assert by_pos[next(iter(win._blocker_cells))] == grey
+
+
+def test_an_item_cell_is_not_marked_again(win):
+    from cargo_engine.blockers import blocker_cells
     win._renderer._items = [(1, 0, 1, 1, 1, 1, "pod")]
     win._cap_combo.setCurrentIndex(win._cap_combo.findData(4))
-    expected = set(blocker_cells(6, 2, 8, 4, slot_max=32))
-    assert (1, 0, 1) in expected
+    expected = set(blocker_cells(6, 2, 8, 4, slot_max=32, occupied={(1, 0, 1)}))
     drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
-    assert drawn == expected - {(1, 0, 1)}
+    assert (1, 0, 1) not in drawn
+    assert drawn == expected
 
 
 def test_changing_ship_recomputes_the_cap(win, monkeypatch):

@@ -424,6 +424,7 @@ RED       = P.red
 HEADER_BG = P.bg_header
 
 CONT_COL    = CONTAINER_COLORS
+BLOCKER_COLOR = "#9aa3b2"
 GRID_LINE   = "#1e2740"
 SLOT_FILL   = "#111827"
 SLOT_OUTLINE = "#252f48"
@@ -992,11 +993,22 @@ class CargoRenderer:
         cat = (self._item_defs.get(key) or {}).get("category")
         return shade(ITEM_COLORS.get(cat, "#9e9e9e"), 0.62)
 
+    def _blocker_base(self, x, y, z) -> str | None:
+        """Grey for a size-cap box. Other 1 SCU boxes keep their own colour."""
+        owner = self._drag_owner
+        cells = getattr(owner, "_blocker_cells", None) if owner is not None else None
+        if cells and (x, y, z) in cells:
+            return BLOCKER_COLOR
+        return None
+
     def base_color_for(self, group) -> str:
         """Unpainted colour of a drawn box (container size or item category)."""
         size = group.box_data[6]
         if isinstance(size, str):
             return self.item_base_color(size)
+        blocked = self._blocker_base(group.box_data[0], group.box_data[1], group.box_data[2])
+        if blocked:
+            return blocked
         return CONT_COL.get(size, "#888888")
 
     def set_rotation(self, rotation: int) -> None:
@@ -1006,6 +1018,9 @@ class CargoRenderer:
 
     def color_for(self, group) -> str:
         """The colour a drawn box shows right now (paint wins over base)."""
+        blocked = self._blocker_base(group.box_data[0], group.box_data[1], group.box_data[2])
+        if blocked:
+            return blocked
         c = self._assignments.get(group.pos_key)
         return commodity_color(c) if c else self.base_color_for(group)
 
@@ -1332,10 +1347,12 @@ class CargoRenderer:
         # Determine base color: commodity assignment overrides container color
         pos_key = (wx, wy, wz, size)
         commodity = self._assignments.get(pos_key)
-        if commodity:
-            base = commodity_color(commodity)
-        else:
-            base = CONT_COL.get(size, "#888888")
+        base = self._blocker_base(wx, wy, wz)
+        if base is None:
+            if commodity:
+                base = commodity_color(commodity)
+            else:
+                base = CONT_COL.get(size, "#888888")
 
         c_top   = base
         c_wallA = shade(base, 0.72)
@@ -4346,20 +4363,31 @@ class CargoApp(SCWindow):
     def _cap_locked_message(self) -> str:
         return _("This 1 SCU holds the size cap. Set Max container size to Off to remove it.")
 
-    def _make_blocker_boxes(self) -> list[tuple]:
-        """1 SCU boxes for the current cap, skipping cells an item already occupies."""
+    def _cargo_besides_blockers(self) -> list[tuple]:
+        """Containers on the grid that are not the cap's 1 SCU boxes."""
+        src = self._renderer._manual_boxes
+        if src is None:
+            src = self._renderer._last_boxes
+        return [tuple(b) for b in (src or []) if not self._is_cap_box(b)]
+
+    def _make_blocker_boxes(self, kept: list[tuple] | None = None) -> list[tuple]:
+        """1 SCU boxes still needed for the cap.
+
+        Cells an item or a kept container already fills are not marked again.
+        """
         x_min, z_min = self._bounds[0], self._bounds[1]
-        items = list(self._renderer._items)
+        obstacles = list(self._renderer._items) + list(kept or [])
         boxes: list[tuple] = []
         cells: set[tuple] = set()
         for slot in self._slots:
-            local = blocker_cells(
-                slot["w"], slot["h"], slot["l"], self._cap_size, slot.get("maxSize"),
-            )
             x0 = slot["x"] - x_min
             y0 = slot.get("y0", 0)
             z0 = slot["z"] - z_min
-            taken = slot_blocked_cells(x0, y0, z0, slot, items) if items else set()
+            taken = slot_blocked_cells(x0, y0, z0, slot, obstacles) if obstacles else set()
+            local = blocker_cells(
+                slot["w"], slot["h"], slot["l"], self._cap_size, slot.get("maxSize"),
+                occupied=taken,
+            )
             for lx, ly, lz in local:
                 if (lx, ly, lz) in taken:
                     continue
@@ -4370,23 +4398,25 @@ class CargoApp(SCWindow):
         return boxes
 
     def _show_blockers(self) -> None:
-        """Replace the containers with the 1 SCU marks for `_cap_size`."""
+        """Add the 1 SCU marks for `_cap_size`. Containers already placed stay."""
         if not self._cap_size or not self._slots:
             return
+        kept = self._cargo_besides_blockers()
         self._set_place_size(None)
-        boxes = self._make_blocker_boxes()
+        added = self._make_blocker_boxes(kept)
         self._move_undo.clear()
-        self._renderer._manual_boxes = boxes
+        self._renderer._manual_boxes = kept + added
+        kept_keys = {(b[0], b[1], b[2], b[6]) for b in kept}
         self._renderer._assignments = {
             k: v for k, v in self._renderer._assignments.items()
-            if not (len(k) >= 4 and isinstance(k[3], int))
+            if not (len(k) >= 4 and isinstance(k[3], int)) or k in kept_keys
         }
         self._sync_counts_from_boxes()
         self._render_grid()
         self._update_assignment_summary()
         self._status_lbl.setText(
             _("{n} \u00d7 1 SCU \u2014 Auto cannot place anything over {cap} SCU").format(
-                n=len(boxes), cap=self._cap_size))
+                n=len(added), cap=self._cap_size))
 
     def _lift_blockers(self, cells: set) -> None:
         """Take the cap's 1 SCU boxes off the grid. Other boxes stay."""
@@ -4410,11 +4440,6 @@ class CargoApp(SCWindow):
             self._blocker_cells = set()
             self._lift_blockers(cells)
             self._status_lbl.setText(_("Max container size off"))
-            return
-        if not self._confirm_reorganise(_("Max container size")):
-            self._sync_cap_combo()
-            self._status_lbl.setText(
-                _("Max container size not changed  \u00b7  nothing was moved"))
             return
         self._cap_size = int(size)
         if self._mode != "manual":

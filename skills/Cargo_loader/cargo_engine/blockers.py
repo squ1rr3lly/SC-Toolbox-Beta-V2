@@ -43,6 +43,7 @@ _DP_MAX_ROWS = 12
 
 def blocker_cells(
     w: int, h: int, l: int, max_size: int, slot_max: int | None = None,
+    occupied: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
     """Slot-local cells to occupy with 1 SCU boxes.
 
@@ -50,6 +51,9 @@ def blocker_cells(
     *max_size* that this slot would otherwise accept. *slot_max* is the grid's
     own max container size (None when the grid does not limit it). 32 SCU, or
     a slot that cannot hold anything larger, returns no cells.
+
+    *occupied* cells are already filled (by cargo already on the grid). They
+    count toward the block, and no blocker is returned on top of them.
     """
     if w < 1 or h < 1 or l < 1:
         return []
@@ -63,7 +67,7 @@ def blocker_cells(
         cells = _lattice(w, h, l, cw, ch, cl)
     else:
         cells = _block_brick(w, h, l, shapes)
-    return _rest_on_filled_cells(cells, w, h, l, shapes)
+    return _rest_on_filled_cells(cells, w, h, l, shapes, occupied)
 
 
 def _target_rotations(
@@ -88,16 +92,18 @@ def _rest_on_filled_cells(
     cells: list[tuple[int, int, int]],
     w: int, h: int, l: int,
     shapes: list[tuple[int, int, int]],
+    occupied: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
-    """Fill box columns down to the floor, then remove unecessary top boxes.
+    """Fill box columns down to the floor, then remove unnecessary top boxes.
+
     A top box is removed when every placement it covered is still covered.
+    Cells in *occupied* already stop a placement and already support whatever
+    sits on them, so no blocker is stacked on those cells or below them.
     """
-    if not cells:
-        return []
-    closed: set[tuple[int, int, int]] = set()
-    for x, y, z in cells:
-        for yy in range(y + 1):
-            closed.add((x, yy, z))
+    filled = {
+        (x, y, z) for (x, y, z) in (occupied or ())
+        if 0 <= x < w and 0 <= y < h and 0 <= z < l
+    }
     placements = [
         (x, y, z, cw, ch, cl)
         for cw, ch, cl in shapes
@@ -105,6 +111,14 @@ def _rest_on_filled_cells(
         for z in range(l - cl + 1)
         for x in range(w - cw + 1)
     ]
+    if not placements or _all_blocked(filled, placements):
+        return []
+    closed: set[tuple[int, int, int]] = set()
+    for x, y, z in cells:
+        for yy in range(y, -1, -1):
+            if (x, yy, z) in filled:
+                break
+            closed.add((x, yy, z))
     for y in range(h - 1, -1, -1):
         tops = sorted(
             (x, y, z) for (x, yy, z) in closed
@@ -114,7 +128,7 @@ def _rest_on_filled_cells(
             if cell not in closed:
                 continue
             closed.remove(cell)
-            if not _all_blocked(closed, placements):
+            if not _all_blocked(closed | filled, placements):
                 closed.add(cell)
     return sorted(closed)
 

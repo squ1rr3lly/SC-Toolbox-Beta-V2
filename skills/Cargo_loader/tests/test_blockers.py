@@ -101,6 +101,27 @@ class TestClosedForms:
         assert len(blocker_cells(8, 3, 15, 16)) == 18
         assert len(blocker_cells(8, 4, 15, 16)) == 27
 
+    def test_cells_already_filled_are_not_marked_again(self):
+        empty = blocker_cells(4, 2, 4, 4)
+        taken = {empty[0]}
+        got = blocker_cells(4, 2, 4, 4, occupied=taken)
+        assert taken.isdisjoint(got)
+        assert len(got) == len(empty) - 1
+        assert not _larger_fits(4, 2, 4, 4, set(got) | taken)
+        assert blocker_cells(4, 2, 4, 4, occupied=set(empty)) == []
+
+    def test_cargo_under_a_blocker_counts_as_the_support(self):
+        # (1, 1, 1) is already a box. The window above it still needs a
+        # blocker, and that blocker rests on the box already there.
+        cargo = {(1, 1, 1)}
+        got = blocker_cells(4, 4, 4, 4, occupied=cargo)
+        assert (1, 1, 1) not in got
+        assert (1, 2, 1) in got
+        assert (1, 0, 1) not in got
+        support = set(got) | cargo
+        assert all(y == 0 or (x, y - 1, z) in support for x, y, z in got)
+        assert not _larger_fits(4, 4, 4, 4, support)
+
 
 class TestPacker:
     GRIDS = [
