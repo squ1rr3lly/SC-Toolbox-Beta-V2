@@ -191,12 +191,12 @@ def test_cap_asks_before_replacing_hand_boxes(win, monkeypatch):
 def test_an_item_cell_is_not_marked_again(win, monkeypatch):
     from cargo_engine.blockers import blocker_cells
     monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
-    win._renderer._items = [(1, 1, 1, 1, 1, 1, "pod")]
+    win._renderer._items = [(1, 0, 1, 1, 1, 1, "pod")]
     win._cap_combo.setCurrentIndex(win._cap_combo.findData(4))
     expected = set(blocker_cells(6, 2, 8, 4, slot_max=32))
-    assert (1, 1, 1) in expected
+    assert (1, 0, 1) in expected
     drawn = {(b[0], b[1], b[2]) for b in win._renderer._manual_boxes}
-    assert drawn == expected - {(1, 1, 1)}
+    assert drawn == expected - {(1, 0, 1)}
 
 
 def test_changing_ship_recomputes_the_cap(win, monkeypatch):

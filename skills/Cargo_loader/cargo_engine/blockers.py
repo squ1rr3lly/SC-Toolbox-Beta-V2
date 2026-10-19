@@ -23,6 +23,10 @@ omino uses the diagonal when that meets the per-line lower bound. Two axes
 that miss the bound are solved by an exact column DP. Three axes that miss
 it keep the diagonal: still a cover, and no ship grid in the datamine is in
 that case.
+
+After determining the required blocking cells, every cell under each has to 
+be filled. Autoload, packing largest first into what remains, then has nowhere to
+put a container above the cap on any layer.
 """
 
 from cargo_engine.packing import _valid_rotations
@@ -45,9 +49,6 @@ def blocker_cells(
     *max_size* that this slot would otherwise accept. *slot_max* is the grid's
     own max container size (None when the grid does not limit it). 32 SCU, or
     a slot that cannot hold anything larger, returns no cells.
-
-    The chosen size still fits whenever the empty slot could hold it: blockers
-    sit on the high end of each window, leaving the origin side open.
     """
     if w < 1 or h < 1 or l < 1:
         return []
@@ -58,8 +59,10 @@ def blocker_cells(
         return []
     if len(shapes) == 1:
         cw, ch, cl = shapes[0]
-        return _lattice(w, h, l, cw, ch, cl)
-    return _block_brick(w, h, l, shapes)
+        cells = _lattice(w, h, l, cw, ch, cl)
+    else:
+        cells = _block_brick(w, h, l, shapes)
+    return _rest_on_filled_cells(cells, w, h, l, shapes)
 
 
 def _target_rotations(
@@ -78,6 +81,54 @@ def _target_rotations(
         if rots:
             return rots
     return []
+
+
+def _rest_on_filled_cells(
+    cells: list[tuple[int, int, int]],
+    w: int, h: int, l: int,
+    shapes: list[tuple[int, int, int]],
+) -> list[tuple[int, int, int]]:
+    """Fill box columns down to the floor, then remove unecessary top boxes.
+    A top box is removed when every placement it covered is still covered.
+    """
+    if not cells:
+        return []
+    closed: set[tuple[int, int, int]] = set()
+    for x, y, z in cells:
+        for yy in range(y + 1):
+            closed.add((x, yy, z))
+    placements = [
+        (x, y, z, cw, ch, cl)
+        for cw, ch, cl in shapes
+        for y in range(h - ch + 1)
+        for z in range(l - cl + 1)
+        for x in range(w - cw + 1)
+    ]
+    for y in range(h - 1, -1, -1):
+        tops = sorted(
+            (x, y, z) for (x, yy, z) in closed
+            if yy == y and (x, y + 1, z) not in closed
+        )
+        for cell in tops:
+            if cell not in closed:
+                continue
+            closed.remove(cell)
+            if not _all_blocked(closed, placements):
+                closed.add(cell)
+    return sorted(closed)
+
+
+def _all_blocked(
+    cells: set[tuple[int, int, int]],
+    placements: list[tuple[int, int, int, int, int, int]],
+) -> bool:
+    for x, y, z, cw, ch, cl in placements:
+        if not any(
+            (x + dx, y + dy, z + dz) in cells
+            for dx in range(cw) for dy in range(ch) for dz in range(cl)
+        ):
+            return False
+    return True
 
 
 def _axis_hits(length: int, span: int) -> list[int]:

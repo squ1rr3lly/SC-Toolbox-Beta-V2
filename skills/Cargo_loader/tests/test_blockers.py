@@ -44,10 +44,23 @@ class TestClosedForms:
         with pytest.raises(ValueError):
             blocker_cells(4, 2, 4, 3)
 
-    def test_8scu_lattice(self):
-        # Cap 4 blocks the 2x2x2 cube. High end of each window of 2.
+    def test_8scu_sits_on_the_floor_of_a_short_grid(self):
+        # Cap 4 blocks the 2x2x2 cube. On a 2-high grid that cube stands on
+        # the floor, so the floor cell of each window is the whole blocker.
         assert blocker_cells(4, 2, 4, 4) == [
-            (1, 1, 1), (1, 1, 3), (3, 1, 1), (3, 1, 3),
+            (1, 0, 1), (1, 0, 3), (3, 0, 1), (3, 0, 3),
+        ]
+
+    def test_400i_cap_4_marks_three_floor_boxes(self):
+        # The 400i's 3x2x7 hold. Three floor boxes, not three boxes in the air.
+        assert blocker_cells(3, 2, 7, 4) == [(1, 0, 1), (1, 0, 3), (1, 0, 5)]
+
+    def test_tall_grid_keeps_the_column_under_an_upper_blocker(self):
+        # Height 4. An 8 SCU can sit on the upper layers, so a blocker stays
+        # at y=2, and y=0 and y=1 under it are filled. The very top is spare.
+        assert blocker_cells(4, 4, 4, 4) == [
+            (1, 0, 1), (1, 0, 3), (1, 1, 1), (1, 1, 3), (1, 2, 1), (1, 2, 3),
+            (3, 0, 1), (3, 0, 3), (3, 1, 1), (3, 1, 3), (3, 2, 1), (3, 2, 3),
         ]
 
     def test_4scu_lattice_on_every_layer(self):
@@ -63,23 +76,30 @@ class TestClosedForms:
 
     def test_wide_grid_counts(self):
         # 8x4x25 is large enough for every orientation that fits the height.
+        # Flat boxes (cap 1 and 2) already mark every layer. Taller boxes gain
+        # the cells under the upper blockers, and a spare top cell is dropped.
         assert len(blocker_cells(8, 4, 25, 1)) == 400   # checkerboard, half the cells
         assert len(blocker_cells(8, 4, 25, 2)) == 192   # flat 4 SCU lattice
-        assert len(blocker_cells(8, 4, 25, 4)) == 96    # 2x2x2 lattice
-        assert len(blocker_cells(8, 4, 25, 8)) == 48    # 16 SCU, three axes
-        assert len(blocker_cells(8, 4, 25, 16)) == 32   # 24 SCU, long side in x and z
-        assert len(blocker_cells(8, 4, 25, 24)) == 24   # 32 SCU, long side in x and z
+        assert len(blocker_cells(8, 4, 25, 4)) == 144   # 2x2x2, columns of height 3
+        assert len(blocker_cells(8, 4, 25, 8)) == 96    # 16 SCU, columns filled under the cover
+        assert len(blocker_cells(8, 4, 25, 16)) == 48   # 24 SCU
+        assert len(blocker_cells(8, 4, 25, 24)) == 36   # 32 SCU
 
     def test_line_bound_is_not_always_achievable(self):
-        # Disjoint copies suggest 8 cells on 8x3x15 and 16 on 8x4x15. A line
-        # of 7 cannot be covered by two cells and still hit the short side,
-        # so the minima are 9 and 18.
-        assert len(blocker_cells(8, 3, 15, 16)) == 9
-        assert len(blocker_cells(8, 4, 15, 16)) == 18
+        # The cover itself is 9 columns on 8x3x15 and 9 on 8x4x15: a line of 7
+        # cannot be covered by two cells and still hit the short side. Each
+        # column is then filled down to the floor, and a spare top cell on the
+        # taller grid is dropped. Height 3 keeps 2 cells per column; height 4
+        # keeps 3.
+        assert len(blocker_cells(8, 3, 15, 16)) == 18
+        assert len(blocker_cells(8, 4, 15, 16)) == 27
 
 
 class TestPacker:
-    GRIDS = [(4, 2, 4), (6, 2, 8), (5, 3, 7), (8, 3, 15), (8, 4, 25), (8, 8, 8)]
+    GRIDS = [
+        (3, 2, 7), (4, 2, 4), (4, 4, 4), (6, 2, 8),
+        (5, 3, 7), (8, 3, 15), (8, 4, 25), (8, 8, 8),
+    ]
 
     @pytest.mark.parametrize("w,h,l", GRIDS)
     @pytest.mark.parametrize("cap", CONTAINER_SIZES)
@@ -88,10 +108,11 @@ class TestPacker:
         assert cells == blocker_cells(w, h, l, cap)
         for x, y, z in cells:
             assert 0 <= x < w and 0 <= y < h and 0 <= z < l
-        got = fill_slot_around(_slot(w, h, l), set(cells))
+        occupied = set(cells)
+        assert all(y == 0 or (x, y - 1, z) in occupied for x, y, z in occupied)
+        got = fill_slot_around(_slot(w, h, l), occupied)
         assert all(size <= cap for size in got)
-        if _fits(cap, w, h, l):
-            assert got.get(cap, 0) >= 1
+        assert len(cells) + sum(size * n for size, n in got.items()) == w * h * l
 
     def test_slot_max_still_stops_a_bigger_box(self):
         # The grid itself would take a 32. Capping at 8, and telling the solver
@@ -100,7 +121,9 @@ class TestPacker:
         cells = blocker_cells(8, 4, 16, 8, slot_max=16)
         assert not _fits(32, 8, 4, 16, cells)
         assert not _fits(16, 8, 4, 16, cells)
-        assert _fits(8, 8, 4, 16, cells)
+        got = fill_slot_around(_slot(8, 4, 16, slot_max=16), set(cells))
+        assert all(size <= 8 for size in got)
+        assert len(cells) + sum(size * n for size, n in got.items()) == 8 * 4 * 16
 
     @pytest.mark.parametrize("w,h,l,cap", [
         (4, 2, 4, 4),
@@ -112,7 +135,13 @@ class TestPacker:
     def test_every_cell_is_needed(self, w, h, l, cap):
         cells = blocker_cells(w, h, l, cap)
         assert cells, "this grid can hold something above the cap"
+        occupied = set(cells)
         assert not _larger_fits(w, h, l, cap, cells)
         for drop in cells:
-            kept = [c for c in cells if c != drop]
-            assert _larger_fits(w, h, l, cap, kept)
+            kept = occupied - {drop}
+            if (drop[0], drop[1] + 1, drop[2]) in occupied:
+                assert any(
+                    y > 0 and (x, y - 1, z) not in kept for x, y, z in kept
+                )
+            else:
+                assert _larger_fits(w, h, l, cap, kept)
