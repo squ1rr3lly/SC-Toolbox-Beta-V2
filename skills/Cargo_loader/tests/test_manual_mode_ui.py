@@ -150,9 +150,10 @@ def test_cap_caption_and_hover_explain_autoloading(win):
     assert len(labels) == 1
     tip = win._cap_combo.toolTip()
     assert labels[0].toolTip() == tip
-    assert "1 SCU" in tip
-    assert "autoloading the ship in its current cargo configuration" in tip
-    assert "larger" in tip and "cargo hold" in tip
+    assert "Optimize fills the cargo hold" in tip
+    assert "no larger than" in tip
+    assert "already on the grid" in tip
+    assert "may be moved" in tip
 
 
 def test_max_container_size_draws_the_blocker_cells(win):
@@ -266,7 +267,7 @@ def test_changing_ship_recomputes_the_cap(win, monkeypatch):
     assert drawn == expected and win._cap_size == 8
 
 
-def test_switching_to_auto_drops_the_cap_before_packing(win, monkeypatch):
+def test_switching_to_auto_drops_the_blocker_boxes_and_keeps_the_cap(win, monkeypatch):
     monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
     hand = (0, 0, 0, 2, 1, 2, 4)
     win._renderer._manual_boxes = [hand]
@@ -275,7 +276,7 @@ def test_switching_to_auto_drops_the_cap_before_packing(win, monkeypatch):
     assert win._blocker_cells
     win._set_mode("auto")
     assert win._mode == "auto"
-    assert win._cap_size is None and win._cap_combo.currentData() is None
+    assert win._cap_size == 8 and win._cap_combo.currentData() == 8
     assert win._blocker_cells == set()
     assert _counts(win) == {4: 1}
     assert [b[6] for b in win._renderer._last_boxes] == [4]
@@ -294,37 +295,29 @@ def test_cancelling_reorganise_keeps_the_cap(win, monkeypatch):
     assert hand in win._renderer._manual_boxes
 
 
-def test_typing_a_count_clears_the_cap_before_packing(win):
+def test_typing_a_count_drops_the_blocker_boxes_and_keeps_the_cap(win):
     win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
     assert win._spinboxes[1].value() > 0
     win._spinboxes[16].setValue(1)
     assert win._mode == "auto"
-    assert win._cap_size is None and win._cap_combo.currentData() is None
+    assert win._cap_size == 8 and win._cap_combo.currentData() == 8
     assert win._blocker_cells == set()
     assert _counts(win) == {16: 1}
     assert [b[6] for b in win._renderer._last_boxes] == [16]
 
 
-def test_optimize_clears_the_cap_before_packing(win, monkeypatch):
+def test_optimize_with_a_cap_keeps_existing_boxes_and_limits_the_fill(win, monkeypatch):
+    monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
     hand = (0, 0, 0, 2, 1, 2, 4)
     win._renderer._manual_boxes = [hand]
     win._sync_counts_from_boxes()
     win._cap_combo.setCurrentIndex(win._cap_combo.findData(8))
-    blockers = set(win._blocker_cells)
-    seen = {}
-    real = win._optimize_empty_hold
-
-    def wrapped():
-        seen["cap"] = win._cap_size
-        seen["cells"] = set(win._blocker_cells)
-        seen["boxes"] = list(win._renderer._manual_boxes or [])
-        return real()
-
-    monkeypatch.setattr(win, "_ask_reorganise", lambda text: True)
-    monkeypatch.setattr(win, "_optimize_empty_hold", wrapped)
     win._optimize()
-    assert seen["cap"] is None and seen["cells"] == set()
-    assert hand in seen["boxes"]
-    assert blockers.isdisjoint((b[0], b[1], b[2]) for b in seen["boxes"])
-    assert win._cap_size is None and win._blocker_cells == set()
+    sizes = [b[6] for b in win._renderer._last_boxes]
+    assert win._cap_size == 8 and win._cap_combo.currentData() == 8
+    assert win._blocker_cells == set()
+    assert all(size <= 8 for size in sizes)
+    assert sizes.count(4) >= 1
+    assert 8 in sizes
+    assert sum(sizes) == 6 * 2 * 8
 

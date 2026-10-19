@@ -187,6 +187,89 @@ def fill_slot_around(slot: dict, blocked=None) -> dict[int, int]:
     return counts
 
 
+def _clone_occupied(occupied) -> list:
+    return [[row[:] for row in plane] for plane in occupied]
+
+
+def _rots_for(size: int, sw: int, sh: int, sl: int):
+    return _valid_rotations(
+        CONTAINER_DIMS[size], sw, sh, sl,
+        max_ch=CONTAINER_MAX_STACK_HEIGHT.get(size),
+    )
+
+
+def _place_sizes(occupied, sizes, sw, sh, sl, out=None) -> bool:
+    """Place each size, largest first. False if one does not fit."""
+    for size in sorted(sizes, reverse=True):
+        rots = _rots_for(size, sw, sh, sl)
+        got = _place_one(occupied, rots, sw, sh, sl) if rots else None
+        if got is None:
+            return False
+        if out is not None:
+            out.append((*got, size))
+    return True
+
+
+def pack_slot_keeping(
+    slot: dict, kept, cap: int, blocked=None,
+) -> list[tuple]:
+    """Slot-local placements that keep *kept* containers and fill the rest.
+
+    *kept* is a list of container sizes already on this grid. Each one is
+    placed again. New containers are at most *cap* SCU, largest first. The
+    kept boxes are not pinned to their old cells: a larger new box is tried
+    first, and the kept box is left in the result only when it still fits
+    beside it, so it moves when that makes room for more of the largest size.
+
+    Returns ``(lx, ly, lz, w, h, l, size)`` relative to the slot origin.
+    """
+    sw, sh, sl = slot["w"], slot["h"], slot["l"]
+    slot_max = slot.get("maxSize")
+    min_size = slot.get("minSize") or 1
+    ceiling = cap if slot_max is None else min(cap, slot_max)
+    addable = [
+        size for size in sorted(CONTAINER_DIMS, reverse=True)
+        if min_size <= size <= ceiling and _rots_for(size, sw, sh, sl)
+    ]
+    kept = [int(size) for size in kept]
+    base = _occupancy(sw, sh, sl, blocked)
+    occ = _clone_occupied(base)
+    added: dict[int, int] = {}
+    for size in addable:
+        rots = _rots_for(size, sw, sh, sl)
+        while True:
+            trial = _clone_occupied(occ)
+            if _place_one(trial, rots, sw, sh, sl) is None:
+                break
+            if kept and not _place_sizes(_clone_occupied(trial), kept, sw, sh, sl):
+                break
+            occ = trial
+            added[size] = added.get(size, 0) + 1
+    out: list[tuple] = []
+    final = _clone_occupied(base)
+    for size in addable:
+        rots = _rots_for(size, sw, sh, sl)
+        for _ in range(added.get(size, 0)):
+            got = _place_one(final, rots, sw, sh, sl)
+            if got is None:
+                break
+            out.append((*got, size))
+    if not _place_sizes(final, kept, sw, sh, sl, out):
+        # The reserved packing did not reconstruct. Place the kept boxes
+        # first so none of them are dropped, then fill what is left.
+        out = []
+        final = _clone_occupied(base)
+        _place_sizes(final, kept, sw, sh, sl, out)
+        for size in addable:
+            rots = _rots_for(size, sw, sh, sl)
+            while True:
+                got = _place_one(final, rots, sw, sh, sl)
+                if got is None:
+                    break
+                out.append((*got, size))
+    return out
+
+
 def build_slots(ship: dict) -> tuple[list[dict], tuple]:
     """Build slot list from ship group/grid data. Returns (slots, bounds)."""
     slots: list[dict] = []

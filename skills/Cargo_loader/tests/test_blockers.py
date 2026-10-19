@@ -10,7 +10,7 @@ shared.path_setup.ensure_path(os.path.dirname(os.path.dirname(os.path.abspath(__
 import pytest  # noqa: E402
 
 from cargo_engine.blockers import blocker_cells  # noqa: E402
-from cargo_engine.packing import fill_slot_around, place_containers_3d, set_long_side_only  # noqa: E402
+from cargo_engine.packing import fill_slot_around, pack_slot_keeping, place_containers_3d, set_long_side_only  # noqa: E402
 from cargo_engine.schema import CONTAINER_SIZES  # noqa: E402
 
 
@@ -121,6 +121,32 @@ class TestClosedForms:
         support = set(got) | cargo
         assert all(y == 0 or (x, y - 1, z) in support for x, y, z in got)
         assert not _larger_fits(4, 4, 4, 4, support)
+
+
+class TestOptimizeKeepsExisting:
+    def test_a_kept_box_moves_aside_so_a_larger_one_fits(self):
+        # 3 wide. Every 8 SCU footprint covers the middle column, so a 1 SCU
+        # left there blocks every 8. Moving it to the side leaves room for one.
+        placed = pack_slot_keeping(_slot(3, 2, 2), [1], 8)
+        sizes = [box[6] for box in placed]
+        assert sizes.count(1) >= 1
+        assert 8 in sizes
+        assert all(size <= 8 for size in sizes)
+        assert sum(sizes) == 3 * 2 * 2
+
+    def test_a_box_above_the_cap_is_kept_and_nothing_larger_is_added(self):
+        placed = pack_slot_keeping(_slot(4, 2, 4), [16], 8)
+        sizes = [box[6] for box in placed]
+        assert 16 in sizes
+        assert all(size <= 8 or size == 16 for size in sizes)
+        assert sum(sizes) == 4 * 2 * 4
+
+    def test_an_empty_grid_fills_with_nothing_above_the_cap(self):
+        placed = pack_slot_keeping(_slot(4, 2, 4), [], 8)
+        sizes = [box[6] for box in placed]
+        assert sizes
+        assert max(sizes) <= 8
+        assert sum(sizes) == 4 * 2 * 4
 
 
 class TestPacker:

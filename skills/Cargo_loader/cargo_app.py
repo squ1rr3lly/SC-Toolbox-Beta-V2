@@ -59,7 +59,7 @@ from cargo_engine.placement import best_rotation, max_containers_in_slot
 from cargo_engine.blockers import blocker_cells
 from cargo_engine.packing import (
     place_containers_3d, build_slots, slot_blocked_cells, fill_slot_around,
-    set_long_side_only,
+    pack_slot_keeping, set_long_side_only,
 )
 from cargo_engine.optimizer import greedy_optimize_3d, assign_slots_from_counts
 from cargo_engine.rendering import (
@@ -1894,9 +1894,10 @@ are a reminder of whichever mode you are in.</p>
       column is the SCU that size contributes.</li>
   <li>The count is capped to what the ship can physically hold in that size,
       and to the capacity left after the other sizes.</li>
-  <li><b>Max autoloaded container size</b> — 1 SCU boxes are placed so that
-      autoloading the ship in its current cargo configuration cannot spawn
-      any box larger than the selected size. Choose Off to take those boxes away.</li>
+  <li><b>Max autoloaded container size</b> — Optimize fills the hold with
+      containers no larger than this, and keeps every container already on
+      the grid. Those may be moved so more of the largest size fit. The 1 SCU
+      marks show the plan in Manual. Choose Off to take the marks away.</li>
 </ul>
 
 <b style="color:#c8d4e8">Buttons</b>
@@ -2738,9 +2739,10 @@ class CargoApp(SCWindow):
                 f"color: {FG_DIM}; font-family: Consolas; font-size: 8pt; background: transparent;"
             )
             cap_tip = _(
-                "1 SCU boxes are placed so that autoloading the ship in its "
-                "current cargo configuration will not spawn any box larger "
-                "than the selected size in the cargo hold.")
+                "Optimize fills the cargo hold using containers no larger than "
+                "the selected size, and keeps every container already on the "
+                "grid. Those containers may be moved so more of the largest "
+                "size fit. The 1 SCU marks are shown in Manual only.")
             cap_lbl.setToolTip(cap_tip)
             pad_lay.addWidget(cap_lbl)
             self._cap_combo = QComboBox(pad)
@@ -4366,6 +4368,18 @@ class CargoApp(SCWindow):
         self._sync_cap_combo()
         return self._lift_blockers(cells, sync_counts=sync_counts)
 
+    def _drop_blockers(self, *, sync_counts: bool = True) -> int:
+        """Take the 1 SCU marks off the grid. The max size stays.
+
+        Auto and Optimize do not use those marks. The containers the user
+        placed stay, and the selected size still limits what Optimize adds.
+        """
+        if not self._blocker_cells:
+            return 0
+        cells = set(self._blocker_cells)
+        self._blocker_cells = set()
+        return self._lift_blockers(cells, sync_counts=sync_counts)
+
     def _is_cap_box(self, box: tuple) -> bool:
         if not self._blocker_cells or len(box) < 7 or box[6] != 1:
             return False
@@ -4456,9 +4470,11 @@ class CargoApp(SCWindow):
             return
         self._cap_size = int(size)
         if self._mode != "manual":
-            self._mode = "manual"
-            self._set_place_size(None)
-            self._refresh_mode_ui()
+            # Auto does not draw the 1 SCU marks. The size limits the next Optimize.
+            self._status_lbl.setText(
+                _("Optimize will fill with containers up to {cap} SCU").format(
+                    cap=self._cap_size))
+            return
         self._show_blockers()
 
     def _set_mode(self, mode: str) -> None:
@@ -4476,11 +4492,14 @@ class CargoApp(SCWindow):
             # What is on screen becomes the arrangement you edit.
             self._renderer._manual_boxes = list(self._renderer._last_boxes)
             self._sync_counts_from_boxes()
-            self._render_grid()
-            self._status_lbl.setText(_("Manual: click a size, then the grid"))
+            if self._cap_size:
+                self._show_blockers()
+            else:
+                self._render_grid()
+                self._status_lbl.setText(_("Manual: click a size, then the grid"))
         else:
             self._set_place_size(None)
-            self._forget_cap()
+            self._drop_blockers()
             self._drop_manual_layout()
             self._update_fill()
             self._status_lbl.setText(_("Auto: counts are packed for you"))
@@ -4510,7 +4529,7 @@ class CargoApp(SCWindow):
             None)
         self._mode = "auto"
         self._set_place_size(None)
-        removed = self._forget_cap(sync_counts=False)
+        removed = self._drop_blockers(sync_counts=False)
         if removed and edited != 1:
             sb = self._spinboxes[1]
             sb.blockSignals(True)
@@ -5417,20 +5436,79 @@ class CargoApp(SCWindow):
             if not self._confirm_reorganise(_("Optimize"), undoable=True):
                 self._status_lbl.setText(_("Optimize cancelled  \u00b7  nothing was moved"))
                 return
+            if self._cap_size:
+                # The marks are a Manual preview. Optimize keeps the size limit
+                # and the containers the user placed, not the marks.
+                self._drop_blockers()
             if any(self._hand_placed()):
                 # Taken now and put back afterwards: _drop_manual_layout below
                 # clears the undo stack, and the dialog promised Ctrl+Z.
                 self._push_undo()
                 undo = self._move_undo.pop()
-            self._forget_cap()
         try:
-            if self._renderer._items:
+            if confirm and self._cap_size:
+                self._optimize_under_cap()
+            elif self._renderer._items:
                 self._optimize_around_items()
             else:
                 self._optimize_empty_hold()
         finally:
             if undo is not None:
                 self._move_undo.append(undo)
+
+    def _kept_sizes_by_slot(self, boxes) -> list[list[int]]:
+        """Container sizes of *boxes*, grouped by the slot each one stands in."""
+        x_min, z_min = self._bounds[0], self._bounds[1]
+        groups: list[list[int]] = [[] for _ in self._slots]
+        for box in boxes:
+            best_i = None
+            best_n = 0
+            for i, slot in enumerate(self._slots):
+                n = len(slot_blocked_cells(
+                    slot["x"] - x_min, slot.get("y0", 0), slot["z"] - z_min,
+                    slot, [box]))
+                if n > best_n:
+                    best_i, best_n = i, n
+            if best_i is not None:
+                groups[best_i].append(int(box[6]))
+        return groups
+
+    def _optimize_under_cap(self) -> None:
+        """Fill every grid with containers up to the max size.
+
+        Containers already on the grid are packed again, and may move so more
+        of the largest allowed size fit. The 1 SCU marks are not part of this.
+        """
+        kept = self._cargo_besides_blockers()
+        x_min, z_min = self._bounds[0], self._bounds[1]
+        items = list(self._renderer._items)
+        groups = self._kept_sizes_by_slot(kept)
+        world: list[tuple] = []
+        per_slot: list[dict] = []
+        for slot, sizes in zip(self._slots, groups):
+            x0 = slot["x"] - x_min
+            y0 = slot.get("y0", 0)
+            z0 = slot["z"] - z_min
+            blocked = slot_blocked_cells(x0, y0, z0, slot, items) if items else None
+            placed = pack_slot_keeping(slot, sizes, self._cap_size, blocked)
+            counts: dict[int, int] = {}
+            for lx, ly, lz, dw, dh, dl, size in placed:
+                world.append((x0 + lx, y0 + ly, z0 + lz, dw, dh, dl, size))
+                counts[size] = counts.get(size, 0) + 1
+            per_slot.append(counts)
+        if self._drag:
+            self._renderer.clear_ghost()
+            self._drag = None
+        self._renderer._manual_boxes = world
+        self._slot_assignment = per_slot
+        self._sync_counts_from_boxes()
+        self._render_grid()
+        self._freeze_if_manual()
+        kept_n = len(kept)
+        self._status_lbl.setText(
+            _("Optimized up to {cap} SCU: {scu} SCU"
+              "  \u00b7  {n} container(s) already on the grid were kept").format(
+                cap=self._cap_size, scu=sum(b[6] for b in world), n=kept_n))
 
     def _optimize_empty_hold(self) -> None:
         """The original Optimize: a reference loadout, else greedy."""
