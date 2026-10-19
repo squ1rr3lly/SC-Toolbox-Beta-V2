@@ -1731,7 +1731,7 @@ def _tutorial_hotkey() -> str:
 
 # The size-cap bullet. Dropped from the live tutorial while the feature is off.
 _CAP_BULLET = re.compile(
-    r"\s*<li><b>Max container size</b>.*?</li>",
+    r"\s*<li><b>Max autoloaded container size</b>.*?</li>",
     re.DOTALL,
 )
 
@@ -1894,9 +1894,9 @@ are a reminder of whichever mode you are in.</p>
       column is the SCU that size contributes.</li>
   <li>The count is capped to what the ship can physically hold in that size,
       and to the capacity left after the other sizes.</li>
-  <li><b>Max container size</b> — the largest box you want on this grid.
-      The view marks the 1 SCU boxes to place so nothing larger can land.
-      Choose Off to take those boxes away.</li>
+  <li><b>Max autoloaded container size</b> — 1 SCU boxes are placed so that
+      autoloading the ship in its current cargo configuration cannot spawn
+      any box larger than the selected size. Choose Off to take those boxes away.</li>
 </ul>
 
 <b style="color:#c8d4e8">Buttons</b>
@@ -2733,18 +2733,22 @@ class CargoApp(SCWindow):
         # Largest box the grid should accept. Hidden unless the `max_container_size` config flag is on.
         self._cap_combo = None
         if max_container_size_enabled():
-            cap_lbl = QLabel(_("Max container size"), pad)
+            cap_lbl = QLabel(_("Max autoloaded container size"), pad)
             cap_lbl.setStyleSheet(
                 f"color: {FG_DIM}; font-family: Consolas; font-size: 8pt; background: transparent;"
             )
+            cap_tip = _(
+                "1 SCU boxes are placed so that autoloading the ship in its "
+                "current cargo configuration will not spawn any box larger "
+                "than the selected size in the cargo hold.")
+            cap_lbl.setToolTip(cap_tip)
             pad_lay.addWidget(cap_lbl)
             self._cap_combo = QComboBox(pad)
             self._cap_combo.addItem(_("Off"), None)
             for size in CONTAINER_SIZES:
                 self._cap_combo.addItem(f"{size} SCU", size)
             self._cap_combo.setCursor(Qt.PointingHandCursor)
-            self._cap_combo.setToolTip(
-                _("Mark the 1 SCU boxes that stop a larger container fitting"))
+            self._cap_combo.setToolTip(cap_tip)
             self._cap_combo.setStyleSheet(f"""
                 QComboBox {{
                     background-color: {BG3}; color: {FG};
@@ -4347,13 +4351,20 @@ class CargoApp(SCWindow):
                 break
         combo.blockSignals(False)
 
-    def _forget_cap(self) -> None:
-        """Drop the cap. The caller removes or replaces the boxes."""
+    def _forget_cap(self, *, sync_counts: bool = True) -> int:
+        """Turn Max container size off and take its boxes off the grid.
+
+        Returns how many blocker boxes were removed. A reorganise does this
+        first, so the pack runs on the cargo that is left. *sync_counts* is
+        false when a spinbox already holds the count to pack.
+        """
         if self._cap_size is None and not self._blocker_cells:
-            return
+            return 0
+        cells = set(self._blocker_cells)
         self._cap_size = None
         self._blocker_cells = set()
         self._sync_cap_combo()
+        return self._lift_blockers(cells, sync_counts=sync_counts)
 
     def _is_cap_box(self, box: tuple) -> bool:
         if not self._blocker_cells or len(box) < 7 or box[6] != 1:
@@ -4418,27 +4429,29 @@ class CargoApp(SCWindow):
             _("{n} \u00d7 1 SCU \u2014 Auto cannot place anything over {cap} SCU").format(
                 n=len(added), cap=self._cap_size))
 
-    def _lift_blockers(self, cells: set) -> None:
-        """Take the cap's 1 SCU boxes off the grid. Other boxes stay."""
+    def _lift_blockers(self, cells: set, *, sync_counts: bool = True) -> int:
+        """Take the cap's 1 SCU boxes off the grid. Other boxes stay.
+
+        Returns how many were removed.
+        """
         boxes = self._renderer._manual_boxes
         if not boxes or not cells:
-            return
-        self._renderer._manual_boxes = [
-            b for b in boxes if (b[0], b[1], b[2]) not in cells
-        ]
-        self._sync_counts_from_boxes()
-        self._render_grid()
-        self._update_assignment_summary()
+            return 0
+        kept = [b for b in boxes if (b[0], b[1], b[2]) not in cells]
+        removed = len(boxes) - len(kept)
+        self._renderer._manual_boxes = kept
+        if sync_counts:
+            self._sync_counts_from_boxes()
+            self._render_grid()
+            self._update_assignment_summary()
+        return removed
 
     def _on_cap_changed(self, _index: int = 0) -> None:
         size = self._cap_combo.currentData()
         if size == self._cap_size:
             return
         if size is None:
-            cells = set(self._blocker_cells)
-            self._cap_size = None
-            self._blocker_cells = set()
-            self._lift_blockers(cells)
+            self._forget_cap()
             self._status_lbl.setText(_("Max container size off"))
             return
         self._cap_size = int(size)
@@ -4491,9 +4504,18 @@ class CargoApp(SCWindow):
                 self._syncing = False
             self._status_lbl.setText(_("Count not changed  \u00b7  nothing was moved"))
             return
+        edited = next(
+            (sz for sz in CONTAINER_SIZES
+             if self._spinboxes[sz].value() != self._counts.get(sz, 0)),
+            None)
         self._mode = "auto"
         self._set_place_size(None)
-        self._forget_cap()
+        removed = self._forget_cap(sync_counts=False)
+        if removed and edited != 1:
+            sb = self._spinboxes[1]
+            sb.blockSignals(True)
+            sb.setValue(max(0, sb.value() - removed))
+            sb.blockSignals(False)
         self._drop_manual_layout()
         self._refresh_mode_ui()
         self._status_lbl.setText(_("Typed a count \u2014 switched to Auto"))
@@ -5349,8 +5371,13 @@ class CargoApp(SCWindow):
         box.show()
 
     def _hand_placed(self) -> tuple[int, int]:
-        """(containers placed by hand, items + crates) currently in the hold."""
+        """(containers placed by hand, items + crates) currently in the hold.
+
+        Size-cap boxes are not counted: a reorganise takes them off before
+        it packs, so the question is only about the cargo that will move.
+        """
         boxes = (self._renderer._manual_boxes or []) if self._mode == "manual" else []
+        boxes = [b for b in boxes if not self._is_cap_box(b)]
         return len(boxes), len(self._renderer._items)
 
     def _ask_reorganise(self, text: str) -> bool:
